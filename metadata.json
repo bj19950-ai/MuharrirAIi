@@ -1,0 +1,6 @@
+{
+  "name": "مُحَرِّر AI",
+  "description": "تطبيق لتحويل ملفات PDF العربية المصورة إلى مستندات Word قابلة للتعديل بدقة مع الحفاظ الكامل على النص الأصلي.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
