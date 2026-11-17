@@ -67,6 +67,42 @@ interface DocumentDao {
         errorMessageAr: String?,
     )
 
+    @Query(
+        """
+        UPDATE documents
+        SET reviewApprovedAt = :approvedAtMillis,
+            processingStatus = :processingStatus,
+            lastModifiedMillis = :lastModifiedMillis
+        WHERE id = :documentId
+        """,
+    )
+    suspend fun updateReviewApprovedAt(
+        documentId: String,
+        approvedAtMillis: Long,
+        processingStatus: String,
+        lastModifiedMillis: Long,
+    )
+
+    @Query(
+        """
+        UPDATE documents
+        SET exportedDocxPath = :docxPath,
+            exportedMode = :exportMode,
+            exportedAtMillis = :exportedAtMillis,
+            processingStatus = :processingStatus,
+            lastModifiedMillis = :lastModifiedMillis
+        WHERE id = :documentId
+        """,
+    )
+    suspend fun updateExportedDocument(
+        documentId: String,
+        docxPath: String,
+        exportMode: String,
+        exportedAtMillis: Long,
+        processingStatus: String,
+        lastModifiedMillis: Long,
+    )
+
     @Query("DELETE FROM documents WHERE id = :documentId")
     suspend fun deleteDocumentById(documentId: String)
 }
@@ -227,6 +263,15 @@ interface ReviewItemDao {
     )
     fun observeReviewItemsForDocument(documentId: String): Flow<List<ReviewItemEntity>>
 
+    @Query(
+        """
+        SELECT * FROM review_items
+        WHERE document_id = :documentId
+        ORDER BY page_number ASC, block_index ASC, line_index ASC, element_index ASC, id ASC
+        """,
+    )
+    suspend fun getReviewItemsInReadingOrder(documentId: String): List<ReviewItemEntity>
+
     @Query("SELECT * FROM review_items WHERE page_id = :pageId ORDER BY priority ASC, element_index ASC, id ASC")
     suspend fun getItemsForPage(pageId: String): List<ReviewItemEntity>
 
@@ -285,6 +330,20 @@ interface ReviewItemDao {
         includeAgreements: Boolean = false,
     ): List<ReviewStatusCountTuple>
 
+    @Query(
+        """
+        SELECT review_status, COUNT(*) AS item_count
+        FROM review_items
+        WHERE document_id = :documentId
+          AND (:includeAgreements = 1 OR category != 'AGREEMENT')
+        GROUP BY review_status
+        """,
+    )
+    fun observeStatusCounts(
+        documentId: String,
+        includeAgreements: Boolean = false,
+    ): Flow<List<ReviewStatusCountTuple>>
+
     suspend fun countByStatus(
         documentId: String,
         includeAgreements: Boolean = false,
@@ -325,6 +384,33 @@ interface ReviewItemDao {
 
     @Update
     suspend fun updateItems(items: List<ReviewItemEntity>)
+
+    @Query(
+        """
+        UPDATE review_items
+        SET review_status = :reviewStatus,
+            user_text = :userText,
+            resolved_at = :resolvedAt,
+            stale_note_ar = NULL
+        WHERE id = :itemId
+        """,
+    )
+    suspend fun saveReviewDecision(
+        itemId: Long,
+        reviewStatus: String,
+        userText: String?,
+        resolvedAt: Long,
+    ): Int
+
+    @Query(
+        """
+        UPDATE review_items
+        SET review_status = 'PENDING',
+            stale_note_ar = NULL
+        WHERE id = :itemId
+        """,
+    )
+    suspend fun reopenReviewItemAsPending(itemId: Long): Int
 
     @Query("DELETE FROM review_items WHERE page_id = :pageId AND review_status = 'PENDING'")
     suspend fun deletePendingForPage(pageId: String)

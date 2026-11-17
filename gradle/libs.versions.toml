@@ -44,6 +44,7 @@ mlkitTextRecognition = "16.0.1"
 tesseract4android = "4.9.0"
 generativeai = "0.9.0"
 securityCrypto = "1.1.0"
+poiAndroid = "3.17"
 
 
 [libraries]
@@ -102,6 +103,7 @@ mlkit-text-recognition = { group = "com.google.mlkit", name = "text-recognition"
 tesseract4android = { group = "cz.adaptech.tesseract4android", name = "tesseract4android", version.ref = "tesseract4android" }
 generativeai = { group = "com.google.ai.client.generativeai", name = "generativeai", version.ref = "generativeai" }
 androidx-security-crypto = { group = "androidx.security", name = "security-crypto", version.ref = "securityCrypto" }
+poi-android = { group = "com.github.SUPERCILEX.poi-android", name = "poi", version.ref = "poiAndroid" }
 
 
 [plugins]

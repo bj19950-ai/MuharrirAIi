@@ -58,8 +58,7 @@ import androidx.compose.ui.unit.dp
 import com.example.ui.components.ScholarlyInfoBanner
 import com.example.ui.components.SectionHeader
 import com.example.ui.components.formatFileSizeArabic
-import com.example.ui.theme.StatusSuccess
-import com.example.ui.theme.StatusSuccessContainer
+import com.example.ui.theme.MuharrirTheme
 import com.example.ui.viewmodel.NewDocumentUiState
 
 @Composable
@@ -417,12 +416,13 @@ private fun SelectedFileMetadataCard(state: NewDocumentUiState) {
             modifier = Modifier.padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
+            val ext = MuharrirTheme.extendedColors
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 Surface(
-                    color = StatusSuccessContainer,
+                    color = ext.successContainer,
                     shape = MaterialTheme.shapes.extraSmall,
                 ) {
                     Row(
@@ -433,13 +433,13 @@ private fun SelectedFileMetadataCard(state: NewDocumentUiState) {
                         Icon(
                             imageVector = Icons.Rounded.CheckCircle,
                             contentDescription = null,
-                            tint = StatusSuccess,
+                            tint = ext.onSuccessContainer,
                             modifier = Modifier.size(14.dp),
                         )
                         Text(
                             text = "ملف PDF صالح",
                             style = MaterialTheme.typography.labelSmall,
-                            color = StatusSuccess,
+                            color = ext.onSuccessContainer,
                         )
                     }
                 }

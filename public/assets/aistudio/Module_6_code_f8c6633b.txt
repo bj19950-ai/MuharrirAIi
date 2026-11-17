@@ -1,0 +1,1561 @@
+1. ReviewContracts.kt (Expected Interfaces & Domain Models Bridging Modules 01–05)
+Kotlin
+package com.example.review.model
+
+import android.graphics.Bitmap
+import kotlinx.coroutines.flow.Flow
+
+enum class DiscrepancyCategory {
+    A, // AGREEMENT -> متطابق
+    B, // DISCREPANCY -> اختلاف
+    C, // UNCERTAIN -> قراءة غير مؤكدة
+    D, // UNRESOLVED_IMAGE -> غير محسوم (الصورة غير واضحة)
+    E  // STRUCTURAL_AMBIGUITY -> غموض بنيوي
+}
+
+enum class ReviewStatus {
+    PENDING,
+    APPROVED_GEMINI,
+    MANUALLY_EDITED,
+    UNRESOLVED,
+    STALE
+}
+
+/**
+ * Exact bounding box in original page bitmap pixel coordinates.
+ */
+data class BoundingBox(
+    val left: Float,
+    val top: Float,
+    val right: Float,
+    val bottom: Float
+)
+
+data class ReviewItemModel(
+    val id: Long,
+    val documentId: Long,
+    val pageNumber: Int,
+    val category: DiscrepancyCategory,
+    val ocrText: String,
+    val suggestedText: String?,
+    val ocrConfidence: Float?,
+    val geminiConfidence: Float?,
+    val evidence: String?,
+    val bbox: BoundingBox?,
+    val reviewStatus: ReviewStatus,
+    val userText: String?,
+    val resolvedAt: Long?,
+    val isStale: Boolean = reviewStatus == ReviewStatus.STALE,
+    val orderIndex: Int = 0
+)
+
+data class ReviewStatusCounts(
+    val total: Int = 0,
+    val approvedGemini: Int = 0,
+    val manuallyEdited: Int = 0,
+    val unresolved: Int = 0,
+    val remaining: Int = 0
+)
+
+data class DocumentReviewInfo(
+    val documentId: Long,
+    val title: String,
+    val reviewApprovedAt: Long?
+)
+
+/**
+ * Adapter interface over Module 05 ReviewItemDao.
+ * Wire your Room @Dao directly to this interface (or inject your DAO if signatures match).
+ */
+interface ReviewQueueGateway {
+    fun getReviewQueue(documentId: Long): Flow<List<ReviewItemModel>>
+    fun countByStatus(documentId: Long): Flow<ReviewStatusCounts>
+    suspend fun getNextPending(documentId: Long, afterItemId: Long): ReviewItemModel?
+    suspend fun saveDecision(
+        itemId: Long,
+        newStatus: ReviewStatus,
+        userText: String?,
+        resolvedAt: Long
+    )
+    suspend fun reopenItemAsPending(itemId: Long)
+}
+
+/**
+ * Adapter interface over Module 01 DocumentDao.
+ */
+interface DocumentReviewGateway {
+    fun observeDocument(documentId: Long): Flow<DocumentReviewInfo?>
+    suspend fun setReviewApprovedAt(documentId: Long, approvedAtMillis: Long)
+}
+
+/**
+ * Adapter interface over Module 02 page bitmap storage (same bitmap source used by OCR).
+ */
+interface PageBitmapSource {
+    suspend fun loadPageBitmap(documentId: Long, pageNumber: Int): Bitmap?
+}
+2. ReviewUiState.kt (State, Filters, Arabic Formatters & Position Memory)
+Kotlin
+package com.example.review.ui
+
+import android.graphics.Bitmap
+import com.example.review.model.DiscrepancyCategory
+import com.example.review.model.ReviewItemModel
+import com.example.review.model.ReviewStatus
+import com.example.review.model.ReviewStatusCounts
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
+import kotlin.math.roundToInt
+
+enum class ReviewFilter(val labelAr: String) {
+    ALL("الكل"),
+    DISCREPANCY_ONLY("اختلاف فقط"),
+    UNRESOLVED_ONLY("غير محسوم فقط"),
+    PENDING_ONLY("غير مراجع فقط")
+}
+
+enum class ReopenReason {
+    STALE_REANALYSIS,
+    MANUAL_REOPEN
+}
+
+data class ReopenConfirmationRequest(
+    val itemId: Long,
+    val reason: ReopenReason
+)
+
+data class ReviewUiState(
+    val documentId: Long = 0L,
+    val documentTitle: String = "",
+    val reviewApprovedAt: Long? = null,
+    val isLoading: Boolean = true,
+    val isSaving: Boolean = false,
+    val allItems: List<ReviewItemModel> = emptyList(),
+    val filteredItems: List<ReviewItemModel> = emptyList(),
+    val currentItem: ReviewItemModel? = null,
+    val currentIndex: Int = 0, // 0-based inside filteredItems
+    val selectedFilter: ReviewFilter = ReviewFilter.ALL,
+    val includeAgreementInAll: Boolean = false,
+    val stats: ReviewStatusCounts = ReviewStatusCounts(),
+    val pageBitmap: Bitmap? = null,
+    val isBitmapLoading: Boolean = false,
+    val bitmapLoadError: Boolean = false,
+    val enlargedCropBitmap: Bitmap? = null,
+    val editedText: String = "",
+    val isManualEditEnabled: Boolean = false,
+    val savedConfirmationVisible: Boolean = false,
+    val confirmationMessage: String? = null,
+    val errorMessage: String? = null,
+    val pageJumpInput: String = "",
+    val pageJumpError: String? = null,
+    val reopenDialog: ReopenConfirmationRequest? = null,
+    val showPartialApprovalDialog: Boolean = false,
+    val approvalSucceeded: Boolean = false
+) {
+    val totalFilteredCount: Int get() = filteredItems.size
+    val displayPosition: Int get() = if (filteredItems.isEmpty() || currentItem == null) 0 else currentIndex + 1
+    val canGoPrevious: Boolean get() = currentIndex > 0
+    val canGoNext: Boolean get() = currentIndex < filteredItems.lastIndex
+}
+
+/**
+ * Preserves the user's current position per document across back navigation and re-entry.
+ */
+object ReviewPositionStore {
+    private val lastItemIdByDocument = ConcurrentHashMap<Long, Long>()
+
+    fun getLastItemId(documentId: Long): Long? = lastItemIdByDocument[documentId]
+
+    fun setLastItemId(documentId: Long, itemId: Long) {
+        lastItemIdByDocument[documentId] = itemId
+    }
+}
+
+object ReviewArabicFormatter {
+    private val arabicLocale = Locale("ar")
+
+    fun categoryLabel(category: DiscrepancyCategory): String = when (category) {
+        DiscrepancyCategory.A -> "متطابق"
+        DiscrepancyCategory.B -> "اختلاف"
+        DiscrepancyCategory.C -> "قراءة غير مؤكدة"
+        DiscrepancyCategory.D -> "غير محسوم (الصورة غير واضحة)"
+        DiscrepancyCategory.E -> "غموض بنيوي"
+    }
+
+    fun statusLabel(status: ReviewStatus, isStale: Boolean): String {
+        if (isStale || status == ReviewStatus.STALE) {
+            return "يتطلب إعادة مراجعة"
+        }
+        return when (status) {
+            ReviewStatus.PENDING -> "قيد الانتظار"
+            ReviewStatus.APPROVED_GEMINI -> "تم قبول اقتراح Gemini"
+            ReviewStatus.MANUALLY_EDITED -> "تم التعديل يدويًا"
+            ReviewStatus.UNRESOLVED -> "غير محسوم"
+            ReviewStatus.STALE -> "يتطلب إعادة مراجعة"
+        }
+    }
+
+    fun formatConfidence(confidence: Float?): String {
+        if (confidence == null) return "غير متوفرة"
+        val percentage = if (confidence <= 1f) {
+            (confidence * 100f).roundToInt()
+        } else {
+            confidence.roundToInt()
+        }.coerceIn(0, 100)
+        return "$percentage%"
+    }
+
+    fun formatResolvedTimestamp(timestampMillis: Long): String {
+        val formatter = SimpleDateFormat("HH:mm - yyyy/MM/dd", arabicLocale)
+        return "حُسم في ${formatter.format(Date(timestampMillis))}"
+    }
+
+    fun initialApprovedText(item: ReviewItemModel): String = when (item.reviewStatus) {
+        ReviewStatus.APPROVED_GEMINI -> item.suggestedText.orEmpty()
+        ReviewStatus.MANUALLY_EDITED -> item.userText.orEmpty()
+        else -> item.suggestedText ?: item.ocrText
+    }
+}
+3. ReviewViewModel.kt (State Management, Bitmap Cropping, Auto-Save & Rollback)
+Kotlin
+package com.example.review.ui
+
+import android.graphics.Bitmap
+import androidx.lifecycle.SavedStateHandle
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import com.example.review.model.BoundingBox
+import com.example.review.model.DiscrepancyCategory
+import com.example.review.model.DocumentReviewGateway
+import com.example.review.model.PageBitmapSource
+import com.example.review.model.ReviewItemModel
+import com.example.review.model.ReviewQueueGateway
+import com.example.review.model.ReviewStatus
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlin.math.roundToInt
+
+class ReviewViewModel(
+    private val documentId: Long,
+    private val reviewQueueGateway: ReviewQueueGateway,
+    private val documentReviewGateway: DocumentReviewGateway,
+    private val pageBitmapSource: PageBitmapSource,
+    private val savedStateHandle: SavedStateHandle = SavedStateHandle(),
+    private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
+    private val defaultDispatcher: CoroutineDispatcher = Dispatchers.Default,
+    private val clock: () -> Long = { System.currentTimeMillis() }
+) : ViewModel() {
+
+    private val _uiState = MutableStateFlow(ReviewUiState(documentId = documentId))
+    val uiState: StateFlow<ReviewUiState> = _uiState.asStateFlow()
+
+    private val pageBitmapCache = mutableMapOf<Int, Bitmap>()
+    private var lastLoadedPageNumber: Int? = null
+    private var lastCroppedKey: Pair<Long, Int>? = null
+    private var bitmapJob: Job? = null
+
+    init {
+        observeReviewData()
+    }
+
+    private fun observeReviewData() {
+        viewModelScope.launch {
+            combine(
+                reviewQueueGateway.getReviewQueue(documentId),
+                reviewQueueGateway.countByStatus(documentId),
+                documentReviewGateway.observeDocument(documentId)
+            ) { items, stats, docInfo ->
+                Triple(items, stats, docInfo)
+            }
+                .catch {
+                    _uiState.update {
+                        it.copy(
+                            isLoading = false,
+                            errorMessage = "تعذّر تحميل قائمة المراجعة. حاول مرة أخرى."
+                        )
+                    }
+                }
+                .collect { (items, stats, docInfo) ->
+                    val currentState = _uiState.value
+                    val filtered = applyFilter(
+                        items = items,
+                        filter = currentState.selectedFilter,
+                        includeAgreement = currentState.includeAgreementInAll
+                    )
+
+                    val preferredId = currentState.currentItem?.id
+                        ?: savedStateHandle.get<Long>(KEY_CURRENT_ITEM_ID)
+                        ?: ReviewPositionStore.getLastItemId(documentId)
+
+                    val resolvedIndex = resolveTargetIndex(filtered, preferredId, currentState.currentIndex)
+                    val targetItem = filtered.getOrNull(resolvedIndex)
+                    val itemChanged = targetItem?.id != currentState.currentItem?.id
+
+                    if (targetItem != null) {
+                        savedStateHandle[KEY_CURRENT_ITEM_ID] = targetItem.id
+                        ReviewPositionStore.setLastItemId(documentId, targetItem.id)
+                    }
+
+                    val nextEditedText = when {
+                        targetItem == null -> ""
+                        itemChanged -> ReviewArabicFormatter.initialApprovedText(targetItem)
+                        currentState.isManualEditEnabled -> currentState.editedText
+                        else -> ReviewArabicFormatter.initialApprovedText(targetItem)
+                    }
+
+                    _uiState.update {
+                        it.copy(
+                            isLoading = false,
+                            documentTitle = docInfo?.title.orEmpty(),
+                            reviewApprovedAt = docInfo?.reviewApprovedAt,
+                            allItems = items,
+                            filteredItems = filtered,
+                            currentItem = targetItem,
+                            currentIndex = resolvedIndex,
+                            stats = stats,
+                            editedText = nextEditedText,
+                            isManualEditEnabled = if (itemChanged) false else it.isManualEditEnabled
+                        )
+                    }
+
+                    if (targetItem != null) {
+                        ensureBitmapAndCrop(targetItem)
+                    } else {
+                        lastLoadedPageNumber = null
+                        lastCroppedKey = null
+                        _uiState.update {
+                            it.copy(
+                                pageBitmap = null,
+                                enlargedCropBitmap = null,
+                                isBitmapLoading = false,
+                                bitmapLoadError = false
+                            )
+                        }
+                    }
+                }
+        }
+    }
+
+    private fun applyFilter(
+        items: List<ReviewItemModel>,
+        filter: ReviewFilter,
+        includeAgreement: Boolean
+    ): List<ReviewItemModel> {
+        return when (filter) {
+            ReviewFilter.ALL -> if (includeAgreement) {
+                items
+            } else {
+                items.filter { it.category != DiscrepancyCategory.A }
+            }
+            ReviewFilter.DISCREPANCY_ONLY -> items.filter { it.category == DiscrepancyCategory.B }
+            ReviewFilter.UNRESOLVED_ONLY -> items.filter { it.reviewStatus == ReviewStatus.UNRESOLVED }
+            ReviewFilter.PENDING_ONLY -> items.filter {
+                it.reviewStatus == ReviewStatus.PENDING || it.isStale
+            }
+        }
+    }
+
+    private fun resolveTargetIndex(
+        filtered: List<ReviewItemModel>,
+        preferredItemId: Long?,
+        fallbackIndex: Int
+    ): Int {
+        if (filtered.isEmpty()) return 0
+        if (preferredItemId != null) {
+            val found = filtered.indexOfFirst { it.id == preferredItemId }
+            if (found >= 0) return found
+        }
+        return fallbackIndex.coerceIn(0, filtered.lastIndex)
+    }
+
+    private fun ensureBitmapAndCrop(item: ReviewItemModel) {
+        val cachedBitmap = pageBitmapCache[item.pageNumber]
+        if (cachedBitmap != null) {
+            if (lastLoadedPageNumber != item.pageNumber) {
+                lastLoadedPageNumber = item.pageNumber
+                _uiState.update {
+                    it.copy(
+                        pageBitmap = cachedBitmap,
+                        isBitmapLoading = false,
+                        bitmapLoadError = false
+                    )
+                }
+            }
+            updateCropFromBitmap(item, cachedBitmap)
+            return
+        }
+
+        bitmapJob?.cancel()
+        bitmapJob = viewModelScope.launch {
+            _uiState.update {
+                it.copy(
+                    isBitmapLoading = true,
+                    bitmapLoadError = false,
+                    enlargedCropBitmap = null
+                )
+            }
+            val loaded = withContext(ioDispatcher) {
+                runCatching { pageBitmapSource.loadPageBitmap(documentId, item.pageNumber) }
+                    .getOrNull()
+            }
+            if (loaded != null) {
+                pageBitmapCache[item.pageNumber] = loaded
+                lastLoadedPageNumber = item.pageNumber
+                val crop = computeEnlargedCrop(loaded, item.bbox)
+                lastCroppedKey = item.id to item.pageNumber
+                _uiState.update {
+                    it.copy(
+                        pageBitmap = loaded,
+                        enlargedCropBitmap = crop,
+                        isBitmapLoading = false,
+                        bitmapLoadError = false
+                    )
+                }
+            } else {
+                _uiState.update {
+                    it.copy(
+                        pageBitmap = null,
+                        enlargedCropBitmap = null,
+                        isBitmapLoading = false,
+                        bitmapLoadError = true
+                    )
+                }
+            }
+        }
+    }
+
+    private fun updateCropFromBitmap(item: ReviewItemModel, bitmap: Bitmap) {
+        val cropKey = item.id to item.pageNumber
+        if (lastCroppedKey == cropKey && _uiState.value.enlargedCropBitmap != null) return
+        viewModelScope.launch {
+            val crop = computeEnlargedCrop(bitmap, item.bbox)
+            lastCroppedKey = cropKey
+            _uiState.update { it.copy(enlargedCropBitmap = crop) }
+        }
+    }
+
+    private suspend fun computeEnlargedCrop(
+        source: Bitmap,
+        bbox: BoundingBox?
+    ): Bitmap? = withContext(defaultDispatcher) {
+        if (bbox == null || source.width <= 0 || source.height <= 0) return@withContext null
+        val boxWidth = (bbox.right - bbox.left).coerceAtLeast(1f)
+        val boxHeight = (bbox.bottom - bbox.top).coerceAtLeast(1f)
+
+        // Expand around bbox by 30% margin on each side using the exact same source bitmap.
+        val marginX = boxWidth * 0.30f
+        val marginY = boxHeight * 0.30f
+
+        val cropLeft = (bbox.left - marginX).toInt().coerceIn(0, source.width - 1)
+        val cropTop = (bbox.top - marginY).toInt().coerceIn(0, source.height - 1)
+        val cropRight = (bbox.right + marginX).roundToInt().coerceIn(cropLeft + 1, source.width)
+        val cropBottom = (bbox.bottom + marginY).roundToInt().coerceIn(cropTop + 1, source.height)
+
+        val cropWidth = (cropRight - cropLeft).coerceAtLeast(1)
+        val cropHeight = (cropBottom - cropTop).coerceAtLeast(1)
+
+        Bitmap.createBitmap(source, cropLeft, cropTop, cropWidth, cropHeight)
+    }
+
+    fun selectFilter(filter: ReviewFilter) {
+        val currentState = _uiState.value
+        val filtered = applyFilter(
+            items = currentState.allItems,
+            filter = filter,
+            includeAgreement = currentState.includeAgreementInAll
+        )
+        val nextIndex = resolveTargetIndex(filtered, currentState.currentItem?.id, 0)
+        selectItemAt(filtered, nextIndex, filter = filter, includeAgreement = currentState.includeAgreementInAll)
+    }
+
+    fun toggleIncludeAgreement() {
+        val currentState = _uiState.value
+        val nextInclude = !currentState.includeAgreementInAll
+        val filtered = applyFilter(
+            items = currentState.allItems,
+            filter = currentState.selectedFilter,
+            includeAgreement = nextInclude
+        )
+        val nextIndex = resolveTargetIndex(filtered, currentState.currentItem?.id, 0)
+        selectItemAt(filtered, nextIndex, filter = currentState.selectedFilter, includeAgreement = nextInclude)
+    }
+
+    fun goToPrevious() {
+        val currentState = _uiState.value
+        if (!currentState.canGoPrevious) return
+        selectItemAt(
+            filtered = currentState.filteredItems,
+            index = currentState.currentIndex - 1,
+            filter = currentState.selectedFilter,
+            includeAgreement = currentState.includeAgreementInAll
+        )
+    }
+
+    fun goToNext() {
+        val currentState = _uiState.value
+        if (!currentState.canGoNext) return
+        selectItemAt(
+            filtered = currentState.filteredItems,
+            index = currentState.currentIndex + 1,
+            filter = currentState.selectedFilter,
+            includeAgreement = currentState.includeAgreementInAll
+        )
+    }
+
+    fun onPageJumpInputChanged(value: String) {
+        val digitsOnly = value.filter { it.isDigit() }
+        _uiState.update { it.copy(pageJumpInput = digitsOnly, pageJumpError = null) }
+    }
+
+    fun jumpToPage() {
+        val state = _uiState.value
+        val targetPage = state.pageJumpInput.toIntOrNull()
+        if (targetPage == null || targetPage <= 0) {
+            _uiState.update { it.copy(pageJumpError = "أدخل رقم صفحة صحيحًا.") }
+            return
+        }
+        val idxInCurrentFilter = state.filteredItems.indexOfFirst { it.pageNumber == targetPage }
+        if (idxInCurrentFilter >= 0) {
+            selectItemAt(
+                filtered = state.filteredItems,
+                index = idxInCurrentFilter,
+                filter = state.selectedFilter,
+                includeAgreement = state.includeAgreementInAll
+            )
+            _uiState.update { it.copy(pageJumpInput = "", pageJumpError = null) }
+            return
+        }
+
+        // Check if the page exists in allItems under another filter
+        val existsInAll = state.allItems.any { it.pageNumber == targetPage }
+        val error = if (existsInAll) {
+            "لا توجد مواضع في الصفحة $targetPage ضمن الفلتر الحالي."
+        } else {
+            "الصفحة $targetPage لا تحتوي على مواضع مراجعة."
+        }
+        _uiState.update { it.copy(pageJumpError = error) }
+    }
+
+    private fun selectItemAt(
+        filtered: List<ReviewItemModel>,
+        index: Int,
+        filter: ReviewFilter,
+        includeAgreement: Boolean
+    ) {
+        val clamped = if (filtered.isEmpty()) 0 else index.coerceIn(0, filtered.lastIndex)
+        val item = filtered.getOrNull(clamped)
+        if (item != null) {
+            savedStateHandle[KEY_CURRENT_ITEM_ID] = item.id
+            ReviewPositionStore.setLastItemId(documentId, item.id)
+        }
+        _uiState.update {
+            it.copy(
+                selectedFilter = filter,
+                includeAgreementInAll = includeAgreement,
+                filteredItems = filtered,
+                currentItem = item,
+                currentIndex = clamped,
+                editedText = item?.let(ReviewArabicFormatter::initialApprovedText).orEmpty(),
+                isManualEditEnabled = false,
+                errorMessage = null,
+                pageJumpError = null
+            )
+        }
+        if (item != null) {
+            ensureBitmapAndCrop(item)
+        } else {
+            _uiState.update { it.copy(pageBitmap = null, enlargedCropBitmap = null) }
+        }
+    }
+
+    /**
+     * Action 1 — "قبول اقتراح Gemini"
+     */
+    fun approveGeminiSuggestion() {
+        val current = _uiState.value.currentItem ?: return
+        val suggested = current.suggestedText ?: return
+        persistDecisionAndAdvance(
+            targetItem = current,
+            newStatus = ReviewStatus.APPROVED_GEMINI,
+            newUserText = suggested,
+            successMessage = "تم قبول اقتراح Gemini وحفظه."
+        )
+    }
+
+    /**
+     * Action 2 (Step 1) — "تعديل يدوي" enables the text field for editing.
+     */
+    fun enableManualEdit() {
+        val current = _uiState.value.currentItem ?: return
+        _uiState.update {
+            it.copy(
+                isManualEditEnabled = true,
+                editedText = it.editedText.ifEmpty { ReviewArabicFormatter.initialApprovedText(current) },
+                errorMessage = null,
+                savedConfirmationVisible = false
+            )
+        }
+    }
+
+    fun cancelManualEdit() {
+        val current = _uiState.value.currentItem
+        _uiState.update {
+            it.copy(
+                isManualEditEnabled = false,
+                editedText = current?.let(ReviewArabicFormatter::initialApprovedText).orEmpty()
+            )
+        }
+    }
+
+    fun onEditedTextChanged(newText: String) {
+        _uiState.update { it.copy(editedText = newText) }
+    }
+
+    /**
+     * Action 2 (Step 2) — Save edited text immediately to Room and move to next pending.
+     */
+    fun saveManualEdit() {
+        val state = _uiState.value
+        val current = state.currentItem ?: return
+        persistDecisionAndAdvance(
+            targetItem = current,
+            newStatus = ReviewStatus.MANUALLY_EDITED,
+            newUserText = state.editedText,
+            successMessage = "تم حفظ التعديل اليدوي."
+        )
+    }
+
+    /**
+     * Action 3 — "ترك دون حسم"
+     */
+    fun markUnresolved() {
+        val current = _uiState.value.currentItem ?: return
+        // Preserves suggested_text as-is (may be null)
+        persistDecisionAndAdvance(
+            targetItem = current,
+            newStatus = ReviewStatus.UNRESOLVED,
+            newUserText = current.userText,
+            successMessage = "تم وضع الموضع كغير محسوم."
+        )
+    }
+
+    private fun persistDecisionAndAdvance(
+        targetItem: ReviewItemModel,
+        newStatus: ReviewStatus,
+        newUserText: String?,
+        successMessage: String
+    ) {
+        val snapshot = _uiState.value
+        val now = clock()
+
+        viewModelScope.launch {
+            _uiState.update {
+                it.copy(
+                    isSaving = true,
+                    savedConfirmationVisible = false,
+                    confirmationMessage = null,
+                    errorMessage = null
+                )
+            }
+
+            try {
+                reviewQueueGateway.saveDecision(
+                    itemId = targetItem.id,
+                    newStatus = newStatus,
+                    userText = newUserText,
+                    resolvedAt = now
+                )
+
+                val nextPending = reviewQueueGateway.getNextPending(documentId, targetItem.id)
+
+                val updatedAll = snapshot.allItems.map { item ->
+                    if (item.id == targetItem.id) {
+                        item.copy(
+                            reviewStatus = newStatus,
+                            userText = newUserText,
+                            resolvedAt = now,
+                            isStale = false
+                        )
+                    } else {
+                        item
+                    }
+                }
+                val updatedFiltered = applyFilter(
+                    items = updatedAll,
+                    filter = snapshot.selectedFilter,
+                    includeAgreement = snapshot.includeAgreementInAll
+                )
+
+                val nextTargetItem = when {
+                    nextPending != null -> updatedFiltered.firstOrNull { it.id == nextPending.id }
+                        ?: updatedFiltered.firstOrNull {
+                            it.id != targetItem.id && (it.reviewStatus == ReviewStatus.PENDING || it.isStale)
+                        }
+                    else -> null
+                }
+
+                val targetIndex = when {
+                    nextTargetItem != null -> updatedFiltered.indexOfFirst { it.id == nextTargetItem.id }
+                    updatedFiltered.isEmpty() -> 0
+                    else -> updatedFiltered.indexOfFirst { it.id == targetItem.id }
+                        .takeIf { it >= 0 }
+                        ?: snapshot.currentIndex.coerceIn(0, updatedFiltered.lastIndex)
+                }
+
+                val resolvedCurrent = updatedFiltered.getOrNull(targetIndex)
+                if (resolvedCurrent != null) {
+                    savedStateHandle[KEY_CURRENT_ITEM_ID] = resolvedCurrent.id
+                    ReviewPositionStore.setLastItemId(documentId, resolvedCurrent.id)
+                }
+
+                _uiState.update {
+                    it.copy(
+                        isSaving = false,
+                        allItems = updatedAll,
+                        filteredItems = updatedFiltered,
+                        currentItem = resolvedCurrent,
+                        currentIndex = targetIndex,
+                        editedText = resolvedCurrent?.let(ReviewArabicFormatter::initialApprovedText).orEmpty(),
+                        isManualEditEnabled = false,
+                        savedConfirmationVisible = true,
+                        confirmationMessage = successMessage,
+                        errorMessage = null
+                    )
+                }
+
+                if (resolvedCurrent != null) {
+                    ensureBitmapAndCrop(resolvedCurrent)
+                }
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (_: Exception) {
+                // Rollback UI state strictly on persistence failure and do NOT show saved checkmark.
+                _uiState.value = snapshot.copy(
+                    isSaving = false,
+                    savedConfirmationVisible = false,
+                    confirmationMessage = null,
+                    errorMessage = SAVE_ERROR_MESSAGE
+                )
+            }
+        }
+    }
+
+    fun requestReopenItem(reason: ReopenReason) {
+        val current = _uiState.value.currentItem ?: return
+        _uiState.update {
+            it.copy(
+                reopenDialog = ReopenConfirmationRequest(itemId = current.id, reason = reason),
+                errorMessage = null
+            )
+        }
+    }
+
+    fun dismissReopenDialog() {
+        _uiState.update { it.copy(reopenDialog = null) }
+    }
+
+    fun confirmReopenItem() {
+        val request = _uiState.value.reopenDialog ?: return
+        val snapshot = _uiState.value
+
+        viewModelScope.launch {
+            _uiState.update { it.copy(isSaving = true, reopenDialog = null, errorMessage = null) }
+            try {
+                reviewQueueGateway.reopenItemAsPending(request.itemId)
+
+                val updatedAll = snapshot.allItems.map { item ->
+                    if (item.id == request.itemId) {
+                        item.copy(
+                            reviewStatus = ReviewStatus.PENDING,
+                            isStale = false
+                        )
+                    } else {
+                        item
+                    }
+                }
+                val updatedFiltered = applyFilter(
+                    items = updatedAll,
+                    filter = snapshot.selectedFilter,
+                    includeAgreement = snapshot.includeAgreementInAll
+                )
+                val targetIndex = resolveTargetIndex(updatedFiltered, request.itemId, snapshot.currentIndex)
+                val current = updatedFiltered.getOrNull(targetIndex)
+
+                _uiState.update {
+                    it.copy(
+                        isSaving = false,
+                        allItems = updatedAll,
+                        filteredItems = updatedFiltered,
+                        currentItem = current,
+                        currentIndex = targetIndex,
+                        editedText = current?.let(ReviewArabicFormatter::initialApprovedText).orEmpty(),
+                        isManualEditEnabled = false,
+                        savedConfirmationVisible = true,
+                        confirmationMessage = "تمت إعادة فتح الموضع للمراجعة."
+                    )
+                }
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (_: Exception) {
+                _uiState.value = snapshot.copy(
+                    isSaving = false,
+                    reopenDialog = null,
+                    savedConfirmationVisible = false,
+                    errorMessage = SAVE_ERROR_MESSAGE
+                )
+            }
+        }
+    }
+
+    fun onApproveReviewClicked() {
+        val remaining = _uiState.value.stats.remaining
+        if (remaining == 0) {
+            approveReviewInternal()
+        } else {
+            _uiState.update { it.copy(showPartialApprovalDialog = true) }
+        }
+    }
+
+    fun dismissPartialApprovalDialog() {
+        _uiState.update { it.copy(showPartialApprovalDialog = false) }
+    }
+
+    fun confirmPartialApproval() {
+        _uiState.update { it.copy(showPartialApprovalDialog = false) }
+        approveReviewInternal()
+    }
+
+    private fun approveReviewInternal() {
+        val now = clock()
+        viewModelScope.launch {
+            _uiState.update { it.copy(isSaving = true, errorMessage = null) }
+            try {
+                documentReviewGateway.setReviewApprovedAt(documentId, now)
+                _uiState.update {
+                    it.copy(
+                        isSaving = false,
+                        reviewApprovedAt = now,
+                        approvalSucceeded = true,
+                        savedConfirmationVisible = true,
+                        confirmationMessage = "تم اعتماد المراجعة بنجاح."
+                    )
+                }
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (_: Exception) {
+                _uiState.update {
+                    it.copy(
+                        isSaving = false,
+                        savedConfirmationVisible = false,
+                        errorMessage = SAVE_ERROR_MESSAGE
+                    )
+                }
+            }
+        }
+    }
+
+    fun dismissFeedbackBanner() {
+        _uiState.update {
+            it.copy(
+                errorMessage = null,
+                savedConfirmationVisible = false,
+                confirmationMessage = null
+            )
+        }
+    }
+
+    companion object {
+        private const val KEY_CURRENT_ITEM_ID = "review_current_item_id"
+        const val SAVE_ERROR_MESSAGE = "تعذّر حفظ قرارك. لم يتم تسجيل التغيير. حاول مرة أخرى."
+    }
+}
+4. ZoomablePageViewer.kt (Exact BBox Overlay + Pinch/Drag Zoom + 3× Enlarged Crop Card)
+Kotlin
+package com.example.review.ui.components
+
+import android.graphics.Bitmap
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.requiredSize
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.BrokenImage
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Remove
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilledTonalIconButton
+import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.material3.minimumInteractiveComponentSize
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.TransformOrigin
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import com.example.review.model.BoundingBox
+import kotlin.math.min
+
+@Composable
+fun ZoomablePageViewer(
+    pageBitmap: Bitmap?,
+    bbox: BoundingBox?,
+    itemId: Long?,
+    isLoading: Boolean,
+    isError: Boolean,
+    modifier: Modifier = Modifier
+) {
+    var scale by remember(itemId) { mutableFloatStateOf(1f) }
+    var offset by remember(itemId) { mutableStateOf(Offset.Zero) }
+
+    LaunchedEffect(itemId) {
+        scale = 1f
+        offset = Offset.Zero
+    }
+
+    val highlightStrokeColor = MaterialTheme.colorScheme.error
+    val highlightFillColor = highlightStrokeColor.copy(alpha = 0.16f)
+
+    Surface(
+        modifier = modifier
+            .clip(RoundedCornerShape(16.dp))
+            .testTag("page_image_viewer"),
+        color = MaterialTheme.colorScheme.surfaceContainerLowest,
+        tonalElevation = 1.dp,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+    ) {
+        BoxWithConstraints(
+            modifier = Modifier.fillMaxSize(),
+            contentAlignment = Alignment.Center
+        ) {
+            val containerWidthPx = with(LocalDensity.current) { maxWidth.toPx() }
+            val containerHeightPx = with(LocalDensity.current) { maxHeight.toPx() }
+
+            when {
+                isLoading -> {
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        CircularProgressIndicator()
+                        Text(
+                            text = "جاري تحميل صورة الصفحة...",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+
+                isError || pageBitmap == null -> {
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.padding(24.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.BrokenImage,
+                            contentDescription = "تعذّر تحميل صورة الصفحة",
+                            tint = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.size(40.dp)
+                        )
+                        Text(
+                            text = "تعذّر تحميل صورة الصفحة من التخزين",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+
+                else -> {
+                    val imageBitmap = remember(pageBitmap) { pageBitmap.asImageBitmap() }
+                    val bitmapWidth = pageBitmap.width.toFloat().coerceAtLeast(1f)
+                    val bitmapHeight = pageBitmap.height.toFloat().coerceAtLeast(1f)
+
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .pointerInput(itemId, containerWidthPx, containerHeightPx) {
+                                detectTransformGestures { _, pan, zoom, _ ->
+                                    val newScale = (scale * zoom).coerceIn(1f, 6f)
+                                    val maxOffsetX = (containerWidthPx * (newScale - 1f)) / 2f
+                                    val maxOffsetY = (containerHeightPx * (newScale - 1f)) / 2f
+                                    val newOffset = if (newScale <= 1f) {
+                                        Offset.Zero
+                                    } else {
+                                        Offset(
+                                            x = (offset.x + pan.x).coerceIn(-maxOffsetX, maxOffsetX),
+                                            y = (offset.y + pan.y).coerceIn(-maxOffsetY, maxOffsetY)
+                                        )
+                                    }
+                                    scale = newScale
+                                    offset = newOffset
+                                }
+                            }
+                            .pointerInput(itemId) {
+                                detectTapGestures(
+                                    onDoubleTap = {
+                                        if (scale > 1.1f) {
+                                            scale = 1f
+                                            offset = Offset.Zero
+                                        } else {
+                                            scale = 2.5f
+                                        }
+                                    }
+                                )
+                            }
+                    ) {
+                        Image(
+                            bitmap = imageBitmap,
+                            contentDescription = "صورة الصفحة الأصلية",
+                            contentScale = ContentScale.Fit,
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .graphicsLayer {
+                                    transformOrigin = TransformOrigin.Center
+                                    scaleX = scale
+                                    scaleY = scale
+                                    translationX = offset.x
+                                    translationY = offset.y
+                                }
+                        )
+
+                        // Exact bbox overlay transformed mathematically identically to the image.
+                        if (bbox != null) {
+                            Canvas(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .testTag("bbox_overlay_canvas")
+                                    .semantics {
+                                        contentDescription = "موضع النص المحدد على الصفحة"
+                                    }
+                            ) {
+                                val fitScale = min(
+                                    size.width / bitmapWidth,
+                                    size.height / bitmapHeight
+                                )
+                                val renderedW = bitmapWidth * fitScale
+                                val renderedH = bitmapHeight * fitScale
+                                val imageOriginX = (size.width - renderedW) / 2f
+                                val imageOriginY = (size.height - renderedH) / 2f
+
+                                val pivotX = size.width / 2f
+                                val pivotY = size.height / 2f
+
+                                fun mapX(pixelX: Float): Float {
+                                    val baseX = imageOriginX + pixelX * fitScale
+                                    return (baseX - pivotX) * scale + pivotX + offset.x
+                                }
+
+                                fun mapY(pixelY: Float): Float {
+                                    val baseY = imageOriginY + pixelY * fitScale
+                                    return (baseY - pivotY) * scale + pivotY + offset.y
+                                }
+
+                                val rectLeft = mapX(bbox.left)
+                                val rectTop = mapY(bbox.top)
+                                val rectRight = mapX(bbox.right)
+                                val rectBottom = mapY(bbox.bottom)
+
+                                val rectWidth = (rectRight - rectLeft).coerceAtLeast(1f)
+                                val rectHeight = (rectBottom - rectTop).coerceAtLeast(1f)
+
+                                drawRect(
+                                    color = highlightFillColor,
+                                    topLeft = Offset(rectLeft, rectTop),
+                                    size = Size(rectWidth, rectHeight)
+                                )
+                                drawRect(
+                                    color = highlightStrokeColor,
+                                    topLeft = Offset(rectLeft, rectTop),
+                                    size = Size(rectWidth, rectHeight),
+                                    style = Stroke(width = 2.dp.toPx())
+                                )
+                            }
+                        }
+
+                        // Zoom controls for desktop mouse/trackpad & quick accessibility
+                        Row(
+                            modifier = Modifier
+                                .align(Alignment.TopStart)
+                                .padding(10.dp)
+                                .background(
+                                    color = MaterialTheme.colorScheme.surface.copy(alpha = 0.88f),
+                                    shape = RoundedCornerShape(12.dp)
+                                )
+                                .padding(horizontal = 4.dp, vertical = 2.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(2.dp)
+                        ) {
+                            FilledTonalIconButton(
+                                onClick = { scale = (scale + 0.5f).coerceAtMost(6f) },
+                                modifier = Modifier
+                                    .minimumInteractiveComponentSize()
+                                    .testTag("zoom_in_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Add,
+                                    contentDescription = "تكبير الصفحة"
+                                )
+                            }
+                            Text(
+                                text = "${(scale * 100).toInt()}%",
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.SemiBold,
+                                modifier = Modifier.padding(horizontal = 6.dp)
+                            )
+                            FilledTonalIconButton(
+                                onClick = {
+                                    val nextScale = (scale - 0.5f).coerceAtLeast(1f)
+                                    scale = nextScale
+                                    if (nextScale <= 1f) offset = Offset.Zero
+                                },
+                                modifier = Modifier
+                                    .minimumInteractiveComponentSize()
+                                    .testTag("zoom_out_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Remove,
+                                    contentDescription = "تصغير الصفحة"
+                                )
+                            }
+                            FilledTonalIconButton(
+                                onClick = {
+                                    scale = 1f
+                                    offset = Offset.Zero
+                                },
+                                modifier = Modifier
+                                    .minimumInteractiveComponentSize()
+                                    .testTag("zoom_reset_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Refresh,
+                                    contentDescription = "إعادة ضبط التكبير"
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun EnlargedCropCard(
+    croppedBitmap: Bitmap?,
+    modifier: Modifier = Modifier
+) {
+    Card(
+        modifier = modifier
+            .fillMaxWidth()
+            .testTag("enlarged_crop_card"),
+        shape = RoundedCornerShape(14.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceContainerLow
+        ),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+    ) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Text(
+                text = "معاينة مكبّرة للموضع (3×)",
+                style = MaterialTheme.typography.labelLarge,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+
+            if (croppedBitmap == null) {
+                Text(
+                    text = "المعاينة المكبّرة غير متوفرة لهذا الموضع.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            } else {
+                val density = LocalDensity.current
+                val scaledWidthDp = with(density) { (croppedBitmap.width * 3f).toDp() }
+                val scaledHeightDp = with(density) { (croppedBitmap.height * 3f).toDp() }
+                val imageBitmap = remember(croppedBitmap) { croppedBitmap.asImageBitmap() }
+
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 64.dp, max = 160.dp)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(MaterialTheme.colorScheme.surfaceContainerLowest)
+                        .horizontalScroll(rememberScrollState())
+                        .verticalScroll(rememberScrollState()),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Image(
+                        bitmap = imageBitmap,
+                        contentDescription = "لقطة مكبرة بنسبة ثلاثة أضعاف حول موضع المراجعة",
+                        contentScale = ContentScale.FillBounds,
+                        modifier = Modifier.requiredSize(width = scaledWidthDp, height = scaledHeightDp)
+                    )
+                }
+                Spacer(modifier = Modifier.height(2.dp))
+            }
+        }
+    }
+}
+5. ReviewScreen.kt (Main Adaptive RTL Review Screen, Review Card, STALE Banner & Bottom Bar)
+Kotlin
+package com.example.review.ui
+
+import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.ArrowForward
+import androidx.compose.material.icons.filled.Assessment
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.ErrorOutline
+import androidx.compose.material.icons.filled.HelpOutline
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.WarningAmber
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.AssistChip
+import androidx.compose.material3.AssistChipDefaults
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.minimumInteractiveComponentSize
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.getValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalLayoutDirection
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.LayoutDirection
+import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.example.review.model.DiscrepancyCategory
+import com.example.review.model.ReviewItemModel
+import com.example.review.model.ReviewStatus
+import com.example.review.model.ReviewStatusCounts
+import com.example.review.ui.components.EnlargedCropCard
+import com.example.review.ui.components.ZoomablePageViewer
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun ReviewScreen(
+    viewModel: ReviewViewModel,
+    onNavigateBack: () -> Unit,
+    onOpenSummary: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+
+    BackHandler {
+        if (uiState.reopenDialog != null) {
+            viewModel.dismissReopenDialog()
+        } else {
+            onNavigateBack()
+        }
+    }
+
+    CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Rtl) {
+        Scaffold(
+            modifier = modifier.fillMaxSize(),
+            contentWindowInsets = WindowInsets(0, 0, 0, 0),
+            topBar = {
+                TopAppBar(
+                    title = {
+                        Text(
+                            text = uiState.documentTitle.ifBlank { "مراجعة المستند" },
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    },
+                    navigationIcon = {
+                        IconButton(
+                            onClick = onNavigateBack,
+                            modifier = Modifier
+                                .minimumInteractiveComponentSize()
+                                .testTag("review_back_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                                contentDescription = "العودة"
+                            )
+                        }
+                    },
+                    actions = {
+                        FilledTonalButton(
+                            onClick = onOpenSummary,
+                            modifier = Modifier
+                                .padding(end = 8.dp)
+                                .minimumInteractiveComponentSize()
+                                .testTag("review_summary_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Assessment,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("ملخص المراجعة")
+                        }
+                    }
+                )
+            },
+            bottomBar = {
+                ReviewBottomNavigationBar(
+                    uiState = uiState,
+                    onPrevious = viewModel::goToPrevious,
+                    onNext = viewModel::goToNext,
+                    onSelectFilter = viewModel::selectFilter,
+                    onToggleIncludeAgreement = viewModel::toggleIncludeAgreement,
+                    onPageJumpChanged = viewModel::onPageJumpInputChanged,
+                    onJumpToPage = viewModel::jumpToPage
+                )
+            }
+        ) { innerPadding ->
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(innerPadding)
+                    .padding(horizontal = 12.dp, vertical = 8.dp)
+            ) {
+                when {
+                    uiState.isLoading -> {
+                        Box(
+                            modifier = Modifier.fillMaxSize(),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Column(
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.spacedBy(12.dp)
+                            ) {
+                                CircularProgressIndicator()
+                                Text("جاري تحميل قائمة المراجعة...")
+                            }
+                        }
+                    }
+
+                    uiState.currentItem == null -> {
+                        EmptyReviewQueueView(
+                            hasAnyItems = uiState.allItems.isNotEmpty(),
+                            onResetFilter = { viewModel.selectFilter(ReviewFilter.ALL) },
+                            onOpenSummary = onOpenSummary
+                        )
+                    }
+
+                    else -> {
+                        val currentItem = uiState.currentItem!!
+                        BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+                            val isWideScreen = maxWidth >= 720.dp
+                            if (isWideScreen) {
+                                // Wide screens (>= 720dp):
+                                // In RTL Row: first child renders on RIGHT, second child renders on LEFT.
+                                // Spec: LEFT = Original page image viewer, RIGHT = Review card (+ enlarged crop).
+                                Row(
+                                    modifier = Modifier.fillMaxSize(),
+                                    horizontalArrangement = Arrangement.spacedBy(16.dp)
+                                ) {
+                                    ReviewCardPane(
+                                        uiState = uiState,
+                                        item = currentItem,
+                                        viewModel = viewModel,
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .fillMaxHeight()
+                                    )
+                                    ZoomablePageViewer(
+                                        pageBitmap = uiState.pageBitmap,
+                                        bbox = currentItem.bbox,
+                                        itemId = currentItem.id,
+                                        isLoading = uiState.isBitmapLoading,
+                                        isError = uiState.bitmapLoadError,
+                                        modifier = Modifier
+                                            .weight(1.15f)
+                                            .fillMaxHeight()
+                                    )
+                                }
+                            } else {
+                                // Narrow screens (< 720dp): TOP = Page viewer, BOTTOM = Review card.
+                                Column(
+                                    modifier = Modifier.fillMaxSize(),
+                                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                                ) {
+                                    ZoomablePageViewer(
+                                        pageBitmap = uiState.pageBitmap,
+                                        bbox = currentItem.bbox,
+                                        itemId = currentItem.id,
+                                        isLoading = uiState.isBitmapLoading,
+                                        isError = uiState.bitmapLoadError,
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .weight(0.42f)
+                                    )
+                                    ReviewCardPane(
+                                        uiState = uiState,
+                                        item = currentItem,
+                                        viewModel = viewModel,
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .weight(0.58f)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        uiState.reopenDialog?.let { request ->
+            val dialogMessage = if (request.reason == ReopenReason.STALE_REANALYSIS) {
+                "هل تريد إعادة هذا الموضع إلى حالة قيد المراجعة لمراجعته من جديد؟"
+            } else {
+                "هل تريد إعادة فتح هذا الموضع للمراجعة؟ سيعود إلى حالة قيد الانتظار دون حذف السجل السابق."
+            }
+            AlertDialog(
+                onDismissRequest = viewModel::dismissReopenDialog,
+                title = { Text("تأكيد إعادة المراجعة") },
+                text = { Text(dialogMessage) },
+                confirmButton = {
+                    Button(
+                        onClick = viewModel::confirmReopenItem,
+                        modifier = Modifier.testTag("confirm_reopen_button")
+                    ) {
+                        Text("نعم، إعادة للمراجعة")
+                    }
+                },
+                dismissButton = {
+                    TextButton(
+                        onClick = viewModel::dismissReopenDialog,
+                        modifier = Modifier.testTag("cancel_reopen_button")
+                    ) {
+                        Text("إلغاء")
+                    }
+                }
+            )
+        }
+    }
+}
+
+@Composable
+private fun ReviewCardPane(
+    uiState: ReviewUiState,
+    item: ReviewItemModel,
+    viewModel: ReviewViewModel,
+    modifier: Modifier = Modifier
+) {
+    Column(
+        modifier = modifier.verticalScroll(rememberScrollState()),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        // Enlarged 3x crop preview next to the review card (same source bitmap)
+        EnlargedCropCard(croppedBitmap = uiState.enlargedCropBitmap)
+
+        // Feedback banners (persistence confirmed vs save failure)
+        AnimatedVisibility(visible = uiState.errorMessage != null) {
+            uiState.errorMessage?.let { errorMsg ->
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("save_error_banner"),

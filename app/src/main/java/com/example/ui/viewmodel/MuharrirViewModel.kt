@@ -25,6 +25,10 @@ import com.example.domain.model.OcrEngineType
 import com.example.domain.model.PipelineStageInfo
 import com.example.domain.model.ProcessingPreferences
 import com.example.domain.ocr.OcrAvailabilityResult
+import com.example.ui.theme.AppThemePalette
+import com.example.ui.theme.AppearanceMode
+import com.example.ui.theme.AppearancePreferences
+import com.example.ui.theme.AppearancePreferencesStore
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -110,6 +114,9 @@ class MuharrirViewModel(
         application = application,
         repository = MuharrirRepository.createDefault(application),
     )
+
+    private val appearanceStore = AppearancePreferencesStore.getInstance(application)
+    val appearancePreferences: StateFlow<AppearancePreferences> = appearanceStore.preferences
 
     private val _selectedFilter = MutableStateFlow(DashboardFilter.ALL)
     private val _selectedDocumentId = MutableStateFlow<String?>(null)
@@ -618,6 +625,14 @@ class MuharrirViewModel(
         viewModelScope.launch { repository.updateResumeAfterInterruption(enabled) }
     }
 
+    fun setAppearanceMode(mode: AppearanceMode) {
+        appearanceStore.setAppearanceMode(mode)
+    }
+
+    fun setThemePalette(palette: AppThemePalette) {
+        appearanceStore.setThemePalette(palette)
+    }
+
     fun addGeminiApiKey(label: String, rawApiKey: String) {
         viewModelScope.launch {
             val result = repository.addGeminiKey(label, rawApiKey)
@@ -720,4 +735,16 @@ class MuharrirViewModel(
     fun dismissSettingsNotice() {
         _settingsNoticeAr.value = null
     }
+
+    val reviewQueueGateway: com.example.review.model.ReviewQueueGateway
+        get() = repository.reviewQueueGateway
+
+    val documentReviewGateway: com.example.review.model.DocumentReviewGateway
+        get() = repository.documentReviewGateway
+
+    val pageBitmapSource: com.example.review.model.PageBitmapSource
+        get() = repository.pageBitmapSource
+
+    val wordExportDataGateway: com.example.export.model.WordExportDataGateway
+        get() = repository.wordExportDataGateway
 }

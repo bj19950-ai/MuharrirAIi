@@ -94,6 +94,8 @@ import com.example.domain.model.OcrPageStatus
 import com.example.domain.model.PageRecord
 import com.example.domain.model.PipelineStageInfo
 import com.example.domain.ocr.OcrAvailabilityResult
+import com.example.export.ui.WordExportSection
+import com.example.export.ui.WordExportViewModel
 import com.example.ui.components.DocumentStatusBadge
 import com.example.ui.components.ImportStatusBadge
 import com.example.ui.components.ModuleAvailabilityPill
@@ -103,10 +105,7 @@ import com.example.ui.components.SectionHeader
 import com.example.ui.components.formatDateTimeArabic
 import com.example.ui.components.formatFileSizeArabic
 import com.example.ui.theme.AmiriFontFamily
-import com.example.ui.theme.StatusSuccess
-import com.example.ui.theme.StatusSuccessContainer
-import com.example.ui.theme.StatusWarning
-import com.example.ui.theme.StatusWarningContainer
+import com.example.ui.theme.MuharrirTheme
 import com.example.ui.viewmodel.GeminiExecutionUiState
 import com.example.ui.viewmodel.OcrExecutionUiState
 
@@ -135,8 +134,10 @@ fun DocumentWorkspaceScreen(
     onRetrySingleOcrPage: (android.content.Context, String, String) -> Unit,
     onStartGeminiAnalysis: (String, String?) -> Unit,
     onPauseGeminiAnalysis: () -> Unit,
+    wordExportViewModel: WordExportViewModel,
     onOpenSettings: () -> Unit,
     onOpenReviewWorkspace: () -> Unit,
+    onOpenReviewSummary: () -> Unit,
     onCreateNewDocument: () -> Unit,
     onReplaceDocument: (DocumentRecord) -> Unit,
     onRemoveDocument: (String) -> Unit,
@@ -219,12 +220,13 @@ fun DocumentWorkspaceScreen(
         ) {
             if (workspaceNoticeAr != null) {
                 item {
+                    val ext = MuharrirTheme.extendedColors
                     Card(
                         modifier = Modifier.fillMaxWidth(),
                         colors = CardDefaults.cardColors(
-                            containerColor = StatusSuccessContainer,
+                            containerColor = ext.successContainer,
                         ),
-                        border = BorderStroke(1.dp, StatusSuccess),
+                        border = BorderStroke(1.dp, ext.success),
                     ) {
                         Row(
                             modifier = Modifier
@@ -236,11 +238,11 @@ fun DocumentWorkspaceScreen(
                             Text(
                                 text = workspaceNoticeAr,
                                 style = MaterialTheme.typography.bodySmall,
-                                color = StatusSuccess,
+                                color = ext.onSuccessContainer,
                                 modifier = Modifier.weight(1f),
                             )
                             TextButton(onClick = onDismissNotice) {
-                                Text("إغلاق")
+                                Text("إغلاق", color = ext.onSuccessContainer)
                             }
                         }
                     }
@@ -386,6 +388,7 @@ fun DocumentWorkspaceScreen(
                 ReviewProgressSectionCard(
                     document = document,
                     onOpenReviewWorkspace = onOpenReviewWorkspace,
+                    onOpenReviewSummary = onOpenReviewSummary,
                 )
             }
 
@@ -401,9 +404,11 @@ fun DocumentWorkspaceScreen(
             }
 
             item {
-                FinalWordPlaceholderCard(
+                FinalWordExportCard(
                     document = document,
                     preferredExportMode = preferredExportMode,
+                    wordExportViewModel = wordExportViewModel,
+                    onOpenReviewSummary = onOpenReviewSummary,
                 )
             }
         }
@@ -439,7 +444,7 @@ private fun EmptyWorkspaceState(
                 fontWeight = FontWeight.Bold,
             )
             Text(
-                text = "استورد ملف PDF جديداً أو اختر مستنداً من لوحة التحكم لعرض صفحاته المفهرسة ومساحة العمل الخاصة به.",
+                text = "استورد ملف PDF جديداً أو اختر مستنداً من الرئيسية لعرض صفحاته المفهرسة ومساحة العمل الخاصة به.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -769,7 +774,7 @@ private fun ProcessingProgressCard(
                         },
                         contentDescription = null,
                         tint = if (stage.isCompletedLocally) {
-                            StatusSuccess
+                            MuharrirTheme.extendedColors.success
                         } else {
                             MaterialTheme.colorScheme.onSurfaceVariant
                         },
@@ -853,9 +858,13 @@ private fun BackendConnectionStatusCard(
 private fun ReviewProgressSectionCard(
     document: DocumentRecord,
     onOpenReviewWorkspace: () -> Unit,
+    onOpenReviewSummary: () -> Unit,
 ) {
+    val approvedAt = document.reviewApprovedAt
     Card(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("workspace_review_progress_card"),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
     ) {
@@ -864,32 +873,74 @@ private fun ReviewProgressSectionCard(
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                Icon(
-                    imageVector = Icons.Rounded.RateReview,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.tertiary,
-                )
-                Text(
-                    text = "تقدم المراجعة البشرية",
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.Bold,
-                )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.RateReview,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.tertiary,
+                    )
+                    Text(
+                        text = "المراجعة البشرية التفاعلية",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold,
+                    )
+                }
+                if (approvedAt != null) {
+                    val ext = MuharrirTheme.extendedColors
+                    Surface(
+                        color = ext.successContainer,
+                        shape = MaterialTheme.shapes.extraSmall,
+                    ) {
+                        Text(
+                            text = "معتمدة",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = ext.onSuccessContainer,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                        )
+                    }
+                }
             }
             Text(
-                text = "العناصر المحسومة: ${document.reviewProgress.resolvedItems} من ${document.reviewProgress.totalItems} — تتوفر عناصر المراجعة بعد تشغيل استخراج OCR ومقارنة Gemini في المراحل اللاحقة.",
+                text = "المحسوم: ${document.reviewProgress.resolvedItems} من ${document.reviewProgress.totalItems} • غير المحسوم: ${document.reviewProgress.unresolvedItems}",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            OutlinedButton(
-                onClick = onOpenReviewWorkspace,
-                modifier = Modifier
-                    .heightIn(min = 48.dp)
-                    .testTag("workspace_open_review_button"),
+            if (approvedAt != null) {
+                Text(
+                    text = "تاريخ اعتماد المراجعة: ${formatDateTimeArabic(approvedAt)}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MuharrirTheme.extendedColors.success,
+                )
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                Text("استعراض هيكل مساحة المراجعة")
+                Button(
+                    onClick = onOpenReviewWorkspace,
+                    modifier = Modifier
+                        .weight(1f)
+                        .heightIn(min = 48.dp)
+                        .testTag("workspace_open_review_button"),
+                ) {
+                    Text("بدء / متابعة المراجعة")
+                }
+                OutlinedButton(
+                    onClick = onOpenReviewSummary,
+                    modifier = Modifier
+                        .weight(1f)
+                        .heightIn(min = 48.dp)
+                        .testTag("workspace_open_review_summary_button"),
+                ) {
+                    Text("ملخص المراجعة")
+                }
             }
         }
     }
@@ -1105,21 +1156,23 @@ private fun OnDeviceOcrCard(
 
             when (val availability = ocrState.availability) {
                 is OcrAvailabilityResult.Ready -> {
+                    val ext = MuharrirTheme.extendedColors
                     ScholarlyInfoBanner(
                         title = "المحرك الأساسي للعربية جاهز",
                         body = "تم التحقق من ملف ara.traineddata وتهيئة محرك Tesseract للغة العربية (ara) على الجهاز.",
                         icon = Icons.Rounded.CheckCircle,
-                        containerColor = StatusSuccessContainer,
-                        contentColor = StatusSuccess,
+                        containerColor = ext.successContainer,
+                        contentColor = ext.onSuccessContainer,
                     )
                 }
                 is OcrAvailabilityResult.LimitedCapability -> {
+                    val ext = MuharrirTheme.extendedColors
                     ScholarlyInfoBanner(
                         title = "تنبيه: محرك ثانوي للاتينية والأرقام فقط",
                         body = availability.warningAr,
                         icon = Icons.Rounded.WarningAmber,
-                        containerColor = StatusWarningContainer,
-                        contentColor = StatusWarning,
+                        containerColor = ext.warningContainer,
+                        contentColor = ext.onWarningContainer,
                     )
                 }
                 is OcrAvailabilityResult.Unavailable -> {
@@ -1346,18 +1399,22 @@ private fun WorkingTextCard(
 }
 
 @Composable
-private fun FinalWordPlaceholderCard(
+private fun FinalWordExportCard(
     document: DocumentRecord,
     preferredExportMode: ExportMode,
+    wordExportViewModel: WordExportViewModel,
+    onOpenReviewSummary: () -> Unit,
 ) {
     Card(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("final_word_export_card"),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
     ) {
         Column(
             modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -1380,40 +1437,33 @@ private fun FinalWordPlaceholderCard(
                     )
                 }
                 Surface(
-                    color = MaterialTheme.colorScheme.surfaceVariant,
+                    color = MaterialTheme.colorScheme.primaryContainer,
                     shape = MaterialTheme.shapes.extraSmall,
                 ) {
-                    Row(
+                    Text(
+                        text = "المرحلة 07",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onPrimaryContainer,
                         modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(4.dp),
-                    ) {
-                        Icon(
-                            imageVector = Icons.Rounded.Schedule,
-                            contentDescription = null,
-                            modifier = Modifier.size(13.dp),
-                        )
-                        Text(
-                            text = "المرحلة 07",
-                            style = MaterialTheme.typography.labelSmall,
-                        )
-                    }
+                    )
                 }
             }
 
-            val exported = document.exportedDocument
-            if (exported == null) {
-                Text(
-                    text = "لم يُنشأ ملف Word بعد. الوضع المختار حالياً من الإعدادات: «${preferredExportMode.arabicTitle}». سيتوفر التصدير الفعلي بصيغة DOCX الداعمة للاتجاه RTL مع تمييز الكلمات غير المحسومة في المرحلة 07.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            } else {
-                Text(
-                    text = "الملف جاهز: ${exported.docxFileRef}",
-                    style = MaterialTheme.typography.bodyMedium,
-                )
-            }
+            Text(
+                text = "إنشاء ملف Word عربي داعم للاتجاه (RTL) مع تمييز المواضع غير المحسومة، باستخدام النمط الافتراضي «${preferredExportMode.arabicTitle}» أو اختيار النمط عند التصدير.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+
+            WordExportSection(
+                documentId = document.id,
+                documentTitle = document.fileName,
+                isReviewApproved = document.reviewApprovedAt != null,
+                preferredExportMode = preferredExportMode,
+                exportedDocument = document.exportedDocument,
+                exportViewModel = wordExportViewModel,
+                onOpenReviewSummary = onOpenReviewSummary,
+            )
         }
     }
 }
@@ -1489,12 +1539,13 @@ private fun GeminiAnalysisWorkspaceCard(
             )
 
             if (!hasUsableKey) {
+                val ext = MuharrirTheme.extendedColors
                 ScholarlyInfoBanner(
                     title = "يلزم مفتاح Gemini API مفعّل",
                     body = "أضف مفتاحاً واحداً على الأقل في الإعدادات (يُحفظ مشفراً عبر Android Keystore) لتفعيل التحليل البصري.",
                     icon = Icons.Rounded.WarningAmber,
-                    containerColor = StatusWarningContainer,
-                    contentColor = StatusWarning,
+                    containerColor = ext.warningContainer,
+                    contentColor = ext.onWarningContainer,
                 )
                 OutlinedButton(
                     onClick = onOpenSettings,
@@ -1582,7 +1633,7 @@ private fun GeminiAnalysisWorkspaceCard(
                     Text(
                         text = "لم يرصد Gemini مواضع تستوجب التصحيح أو الشك في هذه الصفحة (النص مطابق للصورة).",
                         style = MaterialTheme.typography.bodySmall,
-                        color = StatusSuccess,
+                        color = MuharrirTheme.extendedColors.success,
                     )
                 } else {
                     selectedAnalysis.items.take(8).forEach { item ->

@@ -56,6 +56,17 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material.icons.rounded.BrightnessAuto
+import androidx.compose.material.icons.rounded.Check
+import androidx.compose.material.icons.rounded.DarkMode
+import androidx.compose.material.icons.rounded.LightMode
+import androidx.compose.material.icons.rounded.Palette
+import androidx.compose.ui.draw.clip
 import com.example.domain.model.ExportMode
 import com.example.domain.model.GeminiKeyRecord
 import com.example.domain.model.GeminiKeyStatus
@@ -65,19 +76,24 @@ import com.example.domain.model.OcrEngineType
 import com.example.domain.model.ProcessingPreferences
 import com.example.ui.components.ScholarlyInfoBanner
 import com.example.ui.components.SectionHeader
-import com.example.ui.theme.StatusSuccess
-import com.example.ui.theme.StatusSuccessContainer
-import com.example.ui.theme.StatusWarning
-import com.example.ui.theme.StatusWarningContainer
+import com.example.ui.theme.AppThemePalette
+import com.example.ui.theme.AppearanceMode
+import com.example.ui.theme.AppearancePreferences
+import com.example.ui.theme.MuharrirTheme
+import com.example.ui.theme.paletteSwatchPreviewFor
+import com.example.ui.theme.resolveIsDarkTheme
 
 @Composable
 fun SettingsScreen(
     preferences: ProcessingPreferences,
+    appearancePreferences: AppearancePreferences = AppearancePreferences(),
     geminiKeys: List<GeminiKeyRecord>,
     geminiUsageStats: GeminiUsageStats,
     testingKeyId: String?,
     noticeMessageAr: String?,
     onDismissNotice: () -> Unit,
+    onSelectAppearanceMode: (AppearanceMode) -> Unit = {},
+    onSelectThemePalette: (AppThemePalette) -> Unit = {},
     onAddGeminiKey: (label: String, rawKey: String) -> Unit,
     onTestGeminiKey: (keyId: String) -> Unit,
     onToggleGeminiKey: (keyId: String, enabled: Boolean) -> Unit,
@@ -144,6 +160,22 @@ fun SettingsScreen(
                         }
                     }
                 }
+            }
+
+            item {
+                SectionHeader(
+                    title = "المظهر والثيم",
+                    subtitle = "اختيار الوضع النهاري أو الليلي أو التلقائي، ولوحة ألوان هادئة مريحة للعين",
+                    icon = Icons.Rounded.Palette,
+                )
+            }
+
+            item {
+                AppearanceSettingsCard(
+                    appearancePreferences = appearancePreferences,
+                    onSelectAppearanceMode = onSelectAppearanceMode,
+                    onSelectThemePalette = onSelectThemePalette,
+                )
             }
 
             item {
@@ -366,9 +398,10 @@ private fun GeminiApiKeysCard(
 
 @Composable
 private fun GeminiKeyStatusPill(status: GeminiKeyStatus) {
+    val ext = MuharrirTheme.extendedColors
     val (bg, fg) = when (status) {
-        GeminiKeyStatus.VALID -> StatusSuccessContainer to StatusSuccess
-        GeminiKeyStatus.RATE_LIMITED -> StatusWarningContainer to StatusWarning
+        GeminiKeyStatus.VALID -> ext.successContainer to ext.onSuccessContainer
+        GeminiKeyStatus.RATE_LIMITED -> ext.warningContainer to ext.onWarningContainer
         GeminiKeyStatus.INVALID,
         GeminiKeyStatus.QUOTA_EXHAUSTED,
         GeminiKeyStatus.PERMISSION_DENIED -> MaterialTheme.colorScheme.errorContainer to MaterialTheme.colorScheme.onErrorContainer
@@ -773,7 +806,7 @@ private fun AppInfoCard() {
                     tint = MaterialTheme.colorScheme.primary,
                 )
                 Text(
-                    text = "مُحَرِّر AI — Muharrir AI (المرحلة 04 / 07)",
+                    text = "المحرّر",
                     style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.Bold,
                 )
@@ -785,10 +818,208 @@ private fun AppInfoCard() {
             )
             Spacer(modifier = Modifier.height(2.dp))
             Text(
-                text = "البنية الحالية: تخزين خاص محلي، قاعدة بيانات Room v3، محرك OCR محلي (Tesseract العربية / ML Kit)، وتكامل مباشر مع Google Gemini SDK ومخزن مفاتيح مشفر.",
+                text = "البنية الحالية: تخزين خاص محلي، قاعدة بيانات Room محلية، محرك OCR (Tesseract العربية / ML Kit)، تكامل مباشر مع Google Gemini SDK، مراجعة تفاعلية، وتصدير Word عربي (DOCX).",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.primary,
             )
         }
     }
 }
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun AppearanceSettingsCard(
+    appearancePreferences: AppearancePreferences,
+    onSelectAppearanceMode: (AppearanceMode) -> Unit,
+    onSelectThemePalette: (AppThemePalette) -> Unit,
+) {
+    val isDarkPreview = resolveIsDarkTheme(appearancePreferences.appearanceMode)
+
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("appearance_settings_card"),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Text(
+                text = "نمط الإضاءة",
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.Bold,
+            )
+
+            AppearanceMode.entries.forEach { mode ->
+                val selected = appearancePreferences.appearanceMode == mode
+                val modeIcon = when (mode) {
+                    AppearanceMode.LIGHT -> Icons.Rounded.LightMode
+                    AppearanceMode.DARK -> Icons.Rounded.DarkMode
+                    AppearanceMode.SYSTEM -> Icons.Rounded.BrightnessAuto
+                }
+                Surface(
+                    shape = MaterialTheme.shapes.small,
+                    color = if (selected) {
+                        MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f)
+                    } else {
+                        MaterialTheme.colorScheme.surfaceContainerLow
+                    },
+                    border = BorderStroke(
+                        width = if (selected) 1.5.dp else 1.dp,
+                        color = if (selected) {
+                            MaterialTheme.colorScheme.primary
+                        } else {
+                            MaterialTheme.colorScheme.outlineVariant
+                        },
+                    ),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 48.dp)
+                        .clip(MaterialTheme.shapes.small)
+                        .clickable { onSelectAppearanceMode(mode) }
+                        .testTag("appearance_mode_${mode.name}"),
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(
+                            imageVector = modeIcon,
+                            contentDescription = mode.arabicLabel,
+                            tint = if (selected) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            },
+                            modifier = Modifier.size(20.dp),
+                        )
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = mode.arabicLabel,
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                            )
+                            Text(
+                                text = mode.arabicDescription,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        RadioButton(
+                            selected = selected,
+                            onClick = { onSelectAppearanceMode(mode) },
+                        )
+                    }
+                }
+            }
+
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+
+            Text(
+                text = "لوحة ألوان الواجهة والخلفية",
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.Bold,
+            )
+            Text(
+                text = "اختر درجة خلفية هادئة تناسب القراءة الطويلة؛ تتكيّف اللوحة المختارة تلقائياً مع الوضعين النهاري والليلي.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+
+            FlowRow(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+                maxItemsInEachRow = 2,
+            ) {
+                AppThemePalette.entries.forEach { palette ->
+                    val selected = appearancePreferences.themePalette == palette
+                    val swatch = paletteSwatchPreviewFor(palette, darkTheme = isDarkPreview)
+
+                    Surface(
+                        shape = MaterialTheme.shapes.medium,
+                        color = if (selected) {
+                            MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f)
+                        } else {
+                            MaterialTheme.colorScheme.surfaceContainerLow
+                        },
+                        border = BorderStroke(
+                            width = if (selected) 1.5.dp else 1.dp,
+                            color = if (selected) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                MaterialTheme.colorScheme.outlineVariant
+                            },
+                        ),
+                        modifier = Modifier
+                            .weight(1f, fill = true)
+                            .heightIn(min = 64.dp)
+                            .clip(MaterialTheme.shapes.medium)
+                            .clickable { onSelectThemePalette(palette) }
+                            .testTag("theme_palette_${palette.name}"),
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(20.dp)
+                                            .clip(CircleShape)
+                                            .background(swatch.background),
+                                    )
+                                    Box(
+                                        modifier = Modifier
+                                            .size(20.dp)
+                                            .clip(CircleShape)
+                                            .background(swatch.header),
+                                    )
+                                    Box(
+                                        modifier = Modifier
+                                            .size(20.dp)
+                                            .clip(CircleShape)
+                                            .background(swatch.accent),
+                                    )
+                                }
+                                if (selected) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.Check,
+                                        contentDescription = "محدّد",
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(18.dp),
+                                    )
+                                }
+                            }
+                            Text(
+                                text = palette.arabicTitle,
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            Text(
+                                text = palette.arabicSubtitle,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+

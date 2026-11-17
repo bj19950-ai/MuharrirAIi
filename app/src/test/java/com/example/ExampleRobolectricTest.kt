@@ -7,6 +7,7 @@ import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performScrollToNode
 import androidx.test.core.app.ApplicationProvider
 import org.junit.Assert.assertEquals
@@ -27,7 +28,7 @@ class ExampleRobolectricTest {
     fun `app name matches Arabic identity`() {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val appName = context.getString(R.string.app_name)
-        assertEquals("مُحَرِّر AI", appName)
+        assertEquals("المحرّر", appName)
     }
 
     @Test
@@ -35,6 +36,9 @@ class ExampleRobolectricTest {
         composeRule.waitForIdle()
 
         composeRule.onNodeWithTag("dashboard_screen").assertIsDisplayed()
+        composeRule.onNodeWithTag("dashboard_app_title").assertIsDisplayed()
+        composeRule.onNodeWithText("المحرّر").assertIsDisplayed()
+        composeRule.onNodeWithText("لوحة التحكم").assertDoesNotExist()
         composeRule.onNodeWithText("مهمة تحويل جديدة").assertIsDisplayed()
         composeRule.onNodeWithTag("dashboard_lazy_column")
             .performScrollToNode(hasTestTag("dashboard_empty_state"))
@@ -52,16 +56,17 @@ class ExampleRobolectricTest {
         composeRule.onNodeWithTag("document_workspace_screen").assertIsDisplayed()
         composeRule.onNodeWithTag("empty_workspace_state").assertIsDisplayed()
 
-        // Navigate to Review Workspace screen
+        // Navigate to Review screen (no active document -> empty review state)
         composeRule.onNodeWithTag("nav_review").performClick()
         composeRule.waitForIdle()
-        composeRule.onNodeWithTag("review_workspace_screen").assertIsDisplayed()
-        composeRule.onNodeWithTag("review_original_page_panel").assertIsDisplayed()
+        composeRule.onNodeWithTag("empty_review_state").assertIsDisplayed()
 
         // Navigate to Settings screen
         composeRule.onNodeWithTag("nav_settings").performClick()
         composeRule.waitForIdle()
         composeRule.onNodeWithTag("settings_screen").assertIsDisplayed()
-        composeRule.onNodeWithTag("add_api_key_button").assertIsDisplayed()
+        composeRule.onNodeWithTag("appearance_settings_card").assertIsDisplayed()
+        composeRule.onNodeWithTag("appearance_mode_DARK").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithTag("theme_palette_WARM_IVORY").performScrollTo().assertIsDisplayed()
     }
 }

@@ -38,12 +38,7 @@ import com.example.domain.model.DocumentStatus
 import com.example.domain.model.ImportStatus
 import com.example.domain.model.OcrPageStatus
 import com.example.domain.model.StageModuleAvailability
-import com.example.ui.theme.StatusPaused
-import com.example.ui.theme.StatusPausedContainer
-import com.example.ui.theme.StatusSuccess
-import com.example.ui.theme.StatusSuccessContainer
-import com.example.ui.theme.StatusWarning
-import com.example.ui.theme.StatusWarningContainer
+import com.example.ui.theme.MuharrirTheme
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -68,6 +63,7 @@ fun ImportStatusBadge(
     importStatus: ImportStatus,
     modifier: Modifier = Modifier,
 ) {
+    val ext = MuharrirTheme.extendedColors
     val (containerColor, contentColor, icon) = when (importStatus) {
         ImportStatus.IMPORTING -> Triple(
             MaterialTheme.colorScheme.secondaryContainer,
@@ -76,13 +72,13 @@ fun ImportStatusBadge(
         )
         ImportStatus.IMPORTED,
         ImportStatus.READY_FOR_PROCESSING -> Triple(
-            StatusSuccessContainer,
-            StatusSuccess,
+            ext.successContainer,
+            ext.onSuccessContainer,
             Icons.Rounded.CheckCircle,
         )
         ImportStatus.INTERRUPTED -> Triple(
-            StatusWarningContainer,
-            StatusWarning,
+            ext.warningContainer,
+            ext.onWarningContainer,
             Icons.Rounded.PauseCircleOutline,
         )
         ImportStatus.FAILED,
@@ -125,6 +121,7 @@ fun DocumentStatusBadge(
     status: DocumentStatus,
     modifier: Modifier = Modifier,
 ) {
+    val ext = MuharrirTheme.extendedColors
     val (containerColor, contentColor, icon) = when (status) {
         DocumentStatus.NEW -> Triple(
             MaterialTheme.colorScheme.primaryContainer,
@@ -140,19 +137,19 @@ fun DocumentStatusBadge(
             Icons.Rounded.HourglassTop,
         )
         DocumentStatus.NEEDS_REVIEW -> Triple(
-            StatusWarningContainer,
-            StatusWarning,
+            ext.warningContainer,
+            ext.onWarningContainer,
             Icons.Rounded.ErrorOutline,
         )
         DocumentStatus.REVIEW_COMPLETED,
         DocumentStatus.COMPLETED -> Triple(
-            StatusSuccessContainer,
-            StatusSuccess,
+            ext.successContainer,
+            ext.onSuccessContainer,
             Icons.Rounded.CheckCircle,
         )
         DocumentStatus.PAUSED -> Triple(
-            StatusPausedContainer,
-            StatusPaused,
+            ext.pausedContainer,
+            ext.onPausedContainer,
             Icons.Rounded.PauseCircleOutline,
         )
         DocumentStatus.FAILED -> Triple(
@@ -195,21 +192,24 @@ fun ModuleAvailabilityPill(
     isCompletedLocally: Boolean,
     modifier: Modifier = Modifier,
 ) {
+    val ext = MuharrirTheme.extendedColors
     val container: Color
     val content: Color
     val text: String
 
     when {
         isCompletedLocally -> {
-            container = StatusSuccessContainer
-            content = StatusSuccess
+            container = ext.successContainer
+            content = ext.onSuccessContainer
             text = "مكتمل محلياً"
         }
         availability == StageModuleAvailability.READY_IN_MODULE_01 ||
             availability == StageModuleAvailability.READY_IN_MODULE_02 ||
             availability == StageModuleAvailability.READY_IN_MODULE_03 ||
             availability == StageModuleAvailability.READY_IN_MODULE_04 ||
-            availability == StageModuleAvailability.READY_IN_MODULE_05 -> {
+            availability == StageModuleAvailability.READY_IN_MODULE_05 ||
+            availability == StageModuleAvailability.READY_IN_MODULE_06 ||
+            availability == StageModuleAvailability.READY_IN_MODULE_07 -> {
             container = MaterialTheme.colorScheme.primaryContainer
             content = MaterialTheme.colorScheme.onPrimaryContainer
             text = availability.badgeAr
@@ -240,10 +240,11 @@ fun OcrPageStatusBadge(
     ocrStatus: OcrPageStatus,
     modifier: Modifier = Modifier,
 ) {
+    val ext = MuharrirTheme.extendedColors
     val (containerColor, contentColor) = when (ocrStatus) {
         OcrPageStatus.PENDING -> MaterialTheme.colorScheme.surfaceVariant to MaterialTheme.colorScheme.onSurfaceVariant
         OcrPageStatus.RUNNING -> MaterialTheme.colorScheme.secondaryContainer to MaterialTheme.colorScheme.onSecondaryContainer
-        OcrPageStatus.DONE -> StatusSuccessContainer to StatusSuccess
+        OcrPageStatus.DONE -> ext.successContainer to ext.onSuccessContainer
         OcrPageStatus.FAILED -> MaterialTheme.colorScheme.errorContainer to MaterialTheme.colorScheme.onErrorContainer
     }
     Surface(

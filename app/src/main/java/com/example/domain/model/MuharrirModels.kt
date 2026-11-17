@@ -112,6 +112,8 @@ enum class StageModuleAvailability(val badgeAr: String) {
     READY_IN_MODULE_03("متاح في المرحلة 03"),
     READY_IN_MODULE_04("متاح في المرحلة 04"),
     READY_IN_MODULE_05("متاح في المرحلة 05"),
+    READY_IN_MODULE_06("متاح في المرحلة 06"),
+    READY_IN_MODULE_07("متاح في المرحلة 07"),
     PLANNED_MODULE_02_BACKEND("عقد API جاهز — بانتظار الخادم"),
     PLANNED_MODULE_04_05("مخطط للمرحلة 05"),
     PLANNED_MODULE_06("مخطط للمرحلة 06"),
@@ -192,6 +194,10 @@ data class ReviewItem(
     val reasonType: String = "context",
     val staleNoteAr: String? = null,
     val cropBox: BoundingBox? = null,
+    val resolvedAt: Long? = null,
+    val blockIndex: Int = 0,
+    val lineIndex: Int = 0,
+    val elementIndex: Int = 0,
 )
 
 data class PageRecord(
@@ -243,6 +249,7 @@ data class DocumentRecord(
     val pages: List<PageRecord> = emptyList(),
     val reviewItems: List<ReviewItem> = emptyList(),
     val reviewProgress: ReviewProgress = ReviewProgress(),
+    val reviewApprovedAt: Long? = null,
     val exportedDocument: ExportedDocument? = null,
 )
 

@@ -1,0 +1,1086 @@
+Below is the complete Module 07 (Word Generation and Final Export) implementation in Kotlin + Jetpack Compose + Apache POI for Android, along with Gradle configuration, FileProvider setup, Room integration, export UI, unit/Robolectric tests, and the final report.
+1. Gradle & Manifest Configuration
+settings.gradle.kts (Add JitPack for poi-android)
+Kotlin
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories {
+        google()
+        mavenCentral()
+        maven { url = uri("https://jitpack.io") }
+    }
+}
+app/build.gradle.kts (Exact Apache POI Dependency + Packaging Excludes)
+Kotlin
+android {
+    // ... existing config ...
+
+    packaging {
+        resources {
+            excludes += setOf(
+                "META-INF/DEPENDENCIES",
+                "META-INF/LICENSE",
+                "META-INF/LICENSE.txt",
+                "META-INF/NOTICE",
+                "META-INF/NOTICE.txt"
+            )
+        }
+    }
+}
+
+dependencies {
+    // ... existing Modules 01–06 dependencies ...
+
+    // Apache POI port for Android (DOCX generation without java.awt / StAX conflicts)
+    implementation("com.github.SUPERCILEX.poi-android:poi:3.17")
+    // Required by poi-android on Android API 24+ when packaging OOXML schemas
+    implementation("com.fasterxml:aalto-xml:1.3.3")
+}
+app/src/main/res/xml/file_paths.xml (New File)
+Xml
+<?xml version="1.0" encoding="utf-8"?>
+<paths xmlns:android="http://schemas.android.com/apk/res/android">
+    <external-files-path
+        name="exported_documents"
+        path="Documents/" />
+</paths>
+app/src/main/AndroidManifest.xml (Add FileProvider inside <application>)
+Xml
+<application
+    ...>
+
+    <!-- Existing activities -->
+
+    <provider
+        android:name="androidx.core.content.FileProvider"
+        android:authorities="${applicationId}.fileprovider"
+        android:exported="false"
+        android:grantUriPermissions="true">
+        <meta-data
+            android:name="android.support.FILE_PROVIDER_PATHS"
+            android:resource="@xml/file_paths" />
+    </provider>
+</application>
+2. WordExportModels.kt (Modes, Segments & Room-to-Export Contracts)
+Kotlin
+package com.example.export.model
+
+import com.example.review.model.ReviewItemModel
+import com.example.review.model.ReviewStatus
+
+enum class WordExportMode(
+    val titleAr: String,
+    val descriptionAr: String
+) {
+    MATCH_ORIGINAL(
+        titleAr = "مطابقة الأصل",
+        descriptionAr = "إخراج النص بفقرات بسيطة تحافظ على البنية الأصلية دون تنسيق ثقيل."
+    ),
+    ACADEMIC(
+        titleAr = "التنسيق الأكاديمي",
+        descriptionAr = "تطبيق أحجام خطوط متناسقة وعناوين بارزة وتباعد فقرات منتظم."
+    )
+}
+
+/**
+ * Expected page model from Module 01/02 Room schema.
+ * Wire your existing PageEntity directly or map it to this model.
+ */
+data class DocumentPageModel(
+    val id: Long,
+    val documentId: Long,
+    val pageNumber: Int,
+    val ocrText: String
+)
+
+/**
+ * Expected document model from Module 01/06 Room schema.
+ */
+data class ExportDocumentModel(
+    val id: Long,
+    val title: String,
+    val reviewApprovedAt: Long?
+)
+
+data class WordTextSegment(
+    val text: String,
+    val isUnresolvedHighlight: Boolean
+)
+
+data class WordPageSection(
+    val pageNumber: Int,
+    val segments: List<WordTextSegment>
+)
+
+data class WordDocumentPlan(
+    val documentTitle: String,
+    val mode: WordExportMode,
+    val pages: List<WordPageSection>
+)
+
+/**
+ * Gateway querying Room data for final Word export (Module 01 + Module 05 + Module 06).
+ */
+interface WordExportDataGateway {
+    suspend fun getDocument(documentId: Long): ExportDocumentModel?
+    suspend fun getPagesInOrder(documentId: Long): List<DocumentPageModel>
+    suspend fun getReviewItemsInOrder(documentId: Long): List<ReviewItemModel>
+}
+3. WordTextAssembler.kt (Deterministic Room Text Assembly & Ordering)
+Kotlin
+package com.example.export.domain
+
+import com.example.export.model.DocumentPageModel
+import com.example.export.model.ExportDocumentModel
+import com.example.export.model.WordDocumentPlan
+import com.example.export.model.WordExportMode
+import com.example.export.model.WordPageSection
+import com.example.export.model.WordTextSegment
+import com.example.review.model.DiscrepancyCategory
+import com.example.review.model.ReviewItemModel
+import com.example.review.model.ReviewStatus
+
+/**
+ * Pure Kotlin assembler that orders pages by pageNumber and items by reading order,
+ * selecting userText for approved/manually-edited items, ocrText when no review was needed,
+ * and flagging unresolved/pending/stale items for highlighting in Word.
+ */
+object WordTextAssembler {
+
+    fun buildPlan(
+        document: ExportDocumentModel,
+        pages: List<DocumentPageModel>,
+        reviewItems: List<ReviewItemModel>,
+        mode: WordExportMode
+    ): WordDocumentPlan {
+        val sortedPages = pages.sortedBy { it.pageNumber }
+        val itemsByPage = reviewItems
+            .groupBy { it.pageNumber }
+            .mapValues { (_, items) ->
+                items.sortedWith(
+                    compareBy<ReviewItemModel>(
+                        { it.orderIndex },
+                        { it.bbox?.top ?: Float.MAX_VALUE },
+                        // RTL reading order fallback within same line: right-to-left (larger right first)
+                        { -(it.bbox?.right ?: 0f) },
+                        { it.id }
+                    )
+                )
+            }
+
+        val sections = sortedPages.map { page ->
+            val pageItems = itemsByPage[page.pageNumber].orEmpty()
+            val segments = if (pageItems.isEmpty()) {
+                buildSegmentsFromRawPageOcr(page.ocrText)
+            } else {
+                pageItems.mapNotNull { item -> resolveItemSegment(item) }
+            }
+            WordPageSection(
+                pageNumber = page.pageNumber,
+                segments = segments
+            )
+        }
+
+        return WordDocumentPlan(
+            documentTitle = document.title.ifBlank { "مستند مراجع" },
+            mode = mode,
+            pages = sections
+        )
+    }
+
+    private fun buildSegmentsFromRawPageOcr(rawOcrText: String): List<WordTextSegment> {
+        if (rawOcrText.isBlank()) return emptyList()
+        return rawOcrText
+            .split(Regex("\\r?\\n"))
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+            .map { line ->
+                WordTextSegment(
+                    text = line,
+                    isUnresolvedHighlight = false
+                )
+            }
+    }
+
+    private fun resolveItemSegment(item: ReviewItemModel): WordTextSegment? {
+        return when {
+            item.isStale ||
+                item.reviewStatus == ReviewStatus.UNRESOLVED ||
+                item.reviewStatus == ReviewStatus.PENDING ||
+                item.reviewStatus == ReviewStatus.STALE -> {
+                val unresolvedText = item.ocrText.ifBlank { item.suggestedText.orEmpty() }.trim()
+                if (unresolvedText.isEmpty()) null
+                else WordTextSegment(
+                    text = unresolvedText,
+                    isUnresolvedHighlight = true
+                )
+            }
+
+            item.reviewStatus == ReviewStatus.APPROVED_GEMINI ||
+                item.reviewStatus == ReviewStatus.MANUALLY_EDITED -> {
+                val approvedText = item.userText?.takeIf { it.isNotBlank() }
+                    ?: item.suggestedText?.takeIf { it.isNotBlank() }
+                    ?: item.ocrText
+                val trimmed = approvedText.trim()
+                if (trimmed.isEmpty()) null
+                else WordTextSegment(
+                    text = trimmed,
+                    isUnresolvedHighlight = false
+                )
+            }
+
+            // Category A / no review needed: use userText if present, otherwise original OCR text.
+            item.category == DiscrepancyCategory.A -> {
+                val finalText = (item.userText?.takeIf { it.isNotBlank() } ?: item.ocrText).trim()
+                if (finalText.isEmpty()) null
+                else WordTextSegment(
+                    text = finalText,
+                    isUnresolvedHighlight = false
+                )
+            }
+
+            else -> {
+                val fallback = item.ocrText.trim()
+                if (fallback.isEmpty()) null
+                else WordTextSegment(text = fallback, isUnresolvedHighlight = false)
+            }
+        }
+    }
+}
+4. WordGenerator.kt (Apache POI .docx Writer with RTL, Fonts, Modes & Highlighting)
+Kotlin
+package com.example.export.docx
+
+import android.content.Context
+import android.os.Environment
+import com.example.export.domain.WordTextAssembler
+import com.example.export.model.DocumentPageModel
+import com.example.export.model.ExportDocumentModel
+import com.example.export.model.WordDocumentPlan
+import com.example.export.model.WordExportMode
+import com.example.export.model.WordTextSegment
+import com.example.review.model.ReviewItemModel
+import org.apache.poi.xwpf.usermodel.ParagraphAlignment
+import org.apache.poi.xwpf.usermodel.XWPFDocument
+import org.apache.poi.xwpf.usermodel.XWPFParagraph
+import org.apache.poi.xwpf.usermodel.XWPFRun
+import org.apache.xmlbeans.XmlObject
+import java.io.File
+import java.io.FileOutputStream
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+
+class WordGenerator(
+    private val arabicFontName: String = DEFAULT_ARABIC_FONT
+) {
+
+    fun generate(
+        document: ExportDocumentModel,
+        pages: List<DocumentPageModel>,
+        reviewItems: List<ReviewItemModel>,
+        mode: WordExportMode,
+        outputFile: File
+    ): File {
+        require(document.reviewApprovedAt != null) {
+            "لا يمكن إنشاء ملف Word قبل اعتماد المراجعة."
+        }
+
+        val plan = WordTextAssembler.buildPlan(
+            document = document,
+            pages = pages,
+            reviewItems = reviewItems,
+            mode = mode
+        )
+
+        outputFile.parentFile?.mkdirs()
+
+        val xwpfDocument = XWPFDocument()
+        try {
+            enforceDocumentRtlSection(xwpfDocument)
+            writePlanToDocument(xwpfDocument, plan)
+            FileOutputStream(outputFile).use { fos ->
+                xwpfDocument.write(fos)
+            }
+        } finally {
+            xwpfDocument.close()
+        }
+
+        return outputFile
+    }
+
+    fun buildOutputFile(context: Context, documentTitle: String, nowMillis: Long = System.currentTimeMillis()): File {
+        val documentsDir = context.getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS)
+            ?: File(context.filesDir, "Documents")
+        if (!documentsDir.exists()) {
+            documentsDir.mkdirs()
+        }
+        val safeName = sanitizeFileName(documentTitle)
+        val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date(nowMillis))
+        return File(documentsDir, "${safeName}_$timestamp.docx")
+    }
+
+    private fun writePlanToDocument(xwpfDocument: XWPFDocument, plan: WordDocumentPlan) {
+        when (plan.mode) {
+            WordExportMode.MATCH_ORIGINAL -> writeMatchOriginalMode(xwpfDocument, plan)
+            WordExportMode.ACADEMIC -> writeAcademicMode(xwpfDocument, plan)
+        }
+    }
+
+    private fun writeMatchOriginalMode(xwpfDocument: XWPFDocument, plan: WordDocumentPlan) {
+        plan.pages.forEachIndexed { pageIdx, page ->
+            if (page.segments.isEmpty()) {
+                val emptyParagraph = createRtlParagraph(xwpfDocument)
+                val run = createStyledRun(
+                    paragraph = emptyParagraph,
+                    text = "",
+                    fontSize = 12,
+                    isBold = false,
+                    isUnresolvedHighlight = false
+                )
+                run.setText("")
+            } else {
+                page.segments.forEach { segment ->
+                    val paragraph = createRtlParagraph(xwpfDocument)
+                    paragraph.spacingAfter = 80
+                    createStyledRun(
+                        paragraph = paragraph,
+                        text = segment.text,
+                        fontSize = 12,
+                        isBold = false,
+                        isUnresolvedHighlight = segment.isUnresolvedHighlight
+                    )
+                }
+            }
+
+            // Minimal page separation matching original document flow
+            if (pageIdx < plan.pages.lastIndex) {
+                val spacer = createRtlParagraph(xwpfDocument)
+                spacer.spacingAfter = 160
+            }
+        }
+    }
+
+    private fun writeAcademicMode(xwpfDocument: XWPFDocument, plan: WordDocumentPlan) {
+        // Document title heading
+        val titleParagraph = createRtlParagraph(xwpfDocument).apply {
+            spacingBefore = 120
+            spacingAfter = 240
+        }
+        createStyledRun(
+            paragraph = titleParagraph,
+            text = plan.documentTitle,
+            fontSize = 20,
+            isBold = true,
+            isUnresolvedHighlight = false
+        )
+
+        plan.pages.forEach { page ->
+            val headingParagraph = createRtlParagraph(xwpfDocument).apply {
+                spacingBefore = 200
+                spacingAfter = 120
+            }
+            createStyledRun(
+                paragraph = headingParagraph,
+                text = "الصفحة ${page.pageNumber}",
+                fontSize = 15,
+                isBold = true,
+                isUnresolvedHighlight = false
+            )
+
+            page.segments.forEach { segment ->
+                writeAcademicSegmentParagraph(xwpfDocument, segment)
+            }
+        }
+    }
+
+    private fun writeAcademicSegmentParagraph(
+        xwpfDocument: XWPFDocument,
+        segment: WordTextSegment
+    ) {
+        val paragraph = createRtlParagraph(xwpfDocument).apply {
+            spacingBefore = 60
+            spacingAfter = 160
+            setSpacingBetween(1.5)
+        }
+        createStyledRun(
+            paragraph = paragraph,
+            text = segment.text,
+            fontSize = 14,
+            isBold = false,
+            isUnresolvedHighlight = segment.isUnresolvedHighlight
+        )
+    }
+
+    private fun createRtlParagraph(xwpfDocument: XWPFDocument): XWPFParagraph {
+        val paragraph = xwpfDocument.createParagraph()
+        paragraph.alignment = ParagraphAlignment.RIGHT
+        val pPr = paragraph.ctp.pPr ?: paragraph.ctp.addNewPPr()
+        appendWmlElement(pPr, "bidi")
+        return paragraph
+    }
+
+    private fun createStyledRun(
+        paragraph: XWPFParagraph,
+        text: String,
+        fontSize: Int,
+        isBold: Boolean,
+        isUnresolvedHighlight: Boolean
+    ): XWPFRun {
+        val run = paragraph.createRun()
+        run.setText(text)
+        run.fontSize = fontSize
+        run.isBold = isBold
+        run.setFontFamily(arabicFontName, XWPFRun.FontCharRange.ascii)
+        run.setFontFamily(arabicFontName, XWPFRun.FontCharRange.hAnsi)
+        run.setFontFamily(arabicFontName, XWPFRun.FontCharRange.cs)
+
+        val rPr = run.ctr.rPr ?: run.ctr.addNewRPr()
+        if (isUnresolvedHighlight) {
+            // Dual visual marker in Word: yellow highlight + dark red text color
+            run.color = UNRESOLVED_TEXT_RED_HEX
+            appendWmlElementWithAttr(
+                parent = rPr,
+                localName = "highlight",
+                attrName = "val",
+                attrValue = "yellow"
+            )
+        }
+        appendWmlElement(rPr, "rtl")
+        return run
+    }
+
+    private fun enforceDocumentRtlSection(xwpfDocument: XWPFDocument) {
+        val body = xwpfDocument.document.body
+        val sectPr = body.sectPr ?: body.addNewSectPr()
+        appendWmlElement(sectPr, "bidi")
+    }
+
+    private fun appendWmlElement(parent: XmlObject, localName: String) {
+        val cursor = parent.newCursor()
+        try {
+            cursor.toEndToken()
+            cursor.beginElement(localName, WML_NAMESPACE)
+        } finally {
+            cursor.dispose()
+        }
+    }
+
+    private fun appendWmlElementWithAttr(
+        parent: XmlObject,
+        localName: String,
+        attrName: String,
+        attrValue: String
+    ) {
+        val cursor = parent.newCursor()
+        try {
+            cursor.toEndToken()
+            cursor.beginElement(localName, WML_NAMESPACE)
+            cursor.insertAttributeWithValue(attrName, WML_NAMESPACE, attrValue)
+        } finally {
+            cursor.dispose()
+        }
+    }
+
+    private fun sanitizeFileName(rawTitle: String): String {
+        val cleaned = rawTitle
+            .trim()
+            .replace(Regex("[\\\\/:*?\"<>|]"), "_")
+            .replace(Regex("\\s+"), "_")
+        return cleaned.ifBlank { "exported_document" }.take(48)
+    }
+
+    companion object {
+        const val DEFAULT_ARABIC_FONT = "Traditional Arabic"
+        const val UNRESOLVED_TEXT_RED_HEX = "B71C1C"
+        private const val WML_NAMESPACE = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+    }
+}
+5. WordExportManager.kt & WordExportViewModel.kt (Export Execution & Share Intent)
+Kotlin
+package com.example.export.ui
+
+import android.content.ClipData
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import androidx.core.content.FileProvider
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import com.example.export.docx.WordGenerator
+import com.example.export.model.WordExportDataGateway
+import com.example.export.model.WordExportMode
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.File
+
+data class WordExportUiState(
+    val isModeDialogVisible: Boolean = false,
+    val isExporting: Boolean = false,
+    val lastExportedFile: File? = null,
+    val errorMessage: String? = null
+)
+
+sealed interface WordExportEvent {
+    data class ShareDocxFile(val file: File, val documentTitle: String) : WordExportEvent
+}
+
+class WordExportViewModel(
+    private val dataGateway: WordExportDataGateway,
+    private val wordGenerator: WordGenerator = WordGenerator(),
+    private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO
+) : ViewModel() {
+
+    private val _uiState = MutableStateFlow(WordExportUiState())
+    val uiState: StateFlow<WordExportUiState> = _uiState.asStateFlow()
+
+    private val _events = MutableSharedFlow<WordExportEvent>()
+    val events: SharedFlow<WordExportEvent> = _events.asSharedFlow()
+
+    fun openModeChooser() {
+        _uiState.update { it.copy(isModeDialogVisible = true, errorMessage = null) }
+    }
+
+    fun dismissModeChooser() {
+        _uiState.update { it.copy(isModeDialogVisible = false) }
+    }
+
+    fun dismissError() {
+        _uiState.update { it.copy(errorMessage = null) }
+    }
+
+    fun exportDocument(
+        context: Context,
+        documentId: Long,
+        mode: WordExportMode
+    ) {
+        val appContext = context.applicationContext
+        _uiState.update {
+            it.copy(
+                isModeDialogVisible = false,
+                isExporting = true,
+                errorMessage = null
+            )
+        }
+
+        viewModelScope.launch {
+            try {
+                val document = withContext(ioDispatcher) { dataGateway.getDocument(documentId) }
+                if (document == null) {
+                    _uiState.update {
+                        it.copy(isExporting = false, errorMessage = "تعذّر العثور على المستند.")
+                    }
+                    return@launch
+                }
+                if (document.reviewApprovedAt == null) {
+                    _uiState.update {
+                        it.copy(
+                            isExporting = false,
+                            errorMessage = "يجب تأكيد واعتماد المراجعة أولاً قبل التصدير إلى Word."
+                        )
+                    }
+                    return@launch
+                }
+
+                val generatedFile = withContext(ioDispatcher) {
+                    val pages = dataGateway.getPagesInOrder(documentId)
+                    val items = dataGateway.getReviewItemsInOrder(documentId)
+                    val outFile = wordGenerator.buildOutputFile(appContext, document.title)
+                    wordGenerator.generate(
+                        document = document,
+                        pages = pages,
+                        reviewItems = items,
+                        mode = mode,
+                        outputFile = outFile
+                    )
+                }
+
+                _uiState.update {
+                    it.copy(
+                        isExporting = false,
+                        lastExportedFile = generatedFile,
+                        errorMessage = null
+                    )
+                }
+                _events.emit(WordExportEvent.ShareDocxFile(generatedFile, document.title))
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (_: Exception) {
+                _uiState.update {
+                    it.copy(
+                        isExporting = false,
+                        errorMessage = "تعذّر إنشاء ملف Word. حاول مرة أخرى."
+                    )
+                }
+            }
+        }
+    }
+}
+
+object WordShareLauncher {
+    private const val DOCX_MIME_TYPE =
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+
+    fun shareDocx(context: Context, file: File, documentTitle: String) {
+        val authority = "${context.packageName}.fileprovider"
+        val contentUri: Uri = FileProvider.getUriForFile(context, authority, file)
+
+        val shareIntent = Intent(Intent.ACTION_SEND).apply {
+            type = DOCX_MIME_TYPE
+            putExtra(Intent.EXTRA_STREAM, contentUri)
+            putExtra(Intent.EXTRA_SUBJECT, documentTitle)
+            clipData = ClipData.newRawUri(documentTitle, contentUri)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+
+        val chooser = Intent.createChooser(shareIntent, "مشاركة أو فتح ملف Word")
+        context.startActivity(chooser)
+    }
+}
+6. WordExportComponents.kt (Export Button & Mode Selection Dialog for DocumentWorkspaceScreen)
+Kotlin
+package com.example.export.ui
+
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Description
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.minimumInteractiveComponentSize
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLayoutDirection
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.LayoutDirection
+import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.example.export.model.WordExportMode
+
+@Composable
+fun WordExportSection(
+    documentId: Long,
+    isReviewApproved: Boolean,
+    exportViewModel: WordExportViewModel,
+    modifier: Modifier = Modifier
+) {
+    val context = LocalContext.current
+    val uiState by exportViewModel.uiState.collectAsStateWithLifecycle()
+
+    LaunchedEffect(exportViewModel) {
+        exportViewModel.events.collect { event ->
+            when (event) {
+                is WordExportEvent.ShareDocxFile -> {
+                    WordShareLauncher.shareDocx(
+                        context = context,
+                        file = event.file,
+                        documentTitle = event.documentTitle
+                    )
+                }
+            }
+        }
+    }
+
+    CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Rtl) {
+        Column(
+            modifier = modifier.fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Button(
+                onClick = exportViewModel::openModeChooser,
+                enabled = isReviewApproved && !uiState.isExporting,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .minimumInteractiveComponentSize()
+                    .testTag("export_to_word_button")
+            ) {
+                if (uiState.isExporting) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(18.dp),
+                        strokeWidth = 2.dp,
+                        color = MaterialTheme.colorScheme.onPrimary
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("جاري إنشاء ملف Word...")
+                } else {
+                    Icon(
+                        imageVector = Icons.Default.Description,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("تصدير إلى Word")
+                }
+            }
+
+            if (!isReviewApproved) {
+                Text(
+                    text = "يتفعّل التصدير إلى Word بعد اعتماد المراجعة من شاشة ملخص المراجعة.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.testTag("export_disabled_hint")
+                )
+            }
+
+            uiState.errorMessage?.let { errorMsg ->
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("export_error_banner"),
+                    shape = RoundedCornerShape(10.dp),
+                    color = MaterialTheme.colorScheme.errorContainer
+                ) {
+                    Row(
+                        modifier = Modifier.padding(12.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = errorMsg,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onErrorContainer,
+                            modifier = Modifier.weight(1f)
+                        )
+                        TextButton(onClick = exportViewModel::dismissError) {
+                            Text("إغلاق")
+                        }
+                    }
+                }
+            }
+        }
+
+        if (uiState.isModeDialogVisible) {
+            WordExportModeDialog(
+                onSelectMode = { mode ->
+                    exportViewModel.exportDocument(
+                        context = context,
+                        documentId = documentId,
+                        mode = mode
+                    )
+                },
+                onDismiss = exportViewModel::dismissModeChooser
+            )
+        }
+    }
+}
+
+@Composable
+fun WordExportModeDialog(
+    onSelectMode: (WordExportMode) -> Unit,
+    onDismiss: () -> Unit
+) {
+    CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Rtl) {
+        AlertDialog(
+            onDismissRequest = onDismiss,
+            title = { Text("اختر نمط تنسيق Word") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    WordExportMode.entries.forEach { mode ->
+                        Surface(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(12.dp))
+                                .clickable { onSelectMode(mode) }
+                                .minimumInteractiveComponentSize()
+                                .testTag("export_mode_${mode.name.lowercase()}"),
+                            shape = RoundedCornerShape(12.dp),
+                            color = MaterialTheme.colorScheme.surfaceContainerLow,
+                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(14.dp),
+                                verticalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                Text(
+                                    text = mode.titleAr,
+                                    style = MaterialTheme.typography.titleSmall,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(
+                                    text = mode.descriptionAr,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = {
+                TextButton(
+                    onClick = onDismiss,
+                    modifier = Modifier.testTag("cancel_export_mode_dialog")
+                ) {
+                    Text("إلغاء")
+                }
+            }
+        )
+    }
+}
+Wiring into DocumentWorkspaceScreen
+Kotlin
+// Inside DocumentWorkspaceScreen:
+WordExportSection(
+    documentId = document.id,
+    isReviewApproved = document.reviewApprovedAt != null,
+    exportViewModel = wordExportViewModel
+)
+7. WordGeneratorTest.kt (Text Assembly + Robolectric POI .docx Verification)
+Kotlin
+package com.example.export
+
+import android.content.Context
+import android.os.Environment
+import androidx.test.core.app.ApplicationProvider
+import com.example.export.docx.WordGenerator
+import com.example.export.domain.WordTextAssembler
+import com.example.export.model.DocumentPageModel
+import com.example.export.model.ExportDocumentModel
+import com.example.export.model.WordExportMode
+import com.example.review.model.BoundingBox
+import com.example.review.model.DiscrepancyCategory
+import com.example.review.model.ReviewItemModel
+import com.example.review.model.ReviewStatus
+import org.apache.poi.xwpf.usermodel.ParagraphAlignment
+import org.apache.poi.xwpf.usermodel.XWPFDocument
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
+import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
+import java.io.FileInputStream
+
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [36])
+class WordGeneratorTest {
+
+    private fun sampleDocument(approvedAt: Long? = 100_000L) = ExportDocumentModel(
+        id = 1L,
+        title = "مخطوطة التراث",
+        reviewApprovedAt = approvedAt
+    )
+
+    private fun samplePages(): List<DocumentPageModel> = listOf(
+        // Intentionally out of order to test sorting by pageNumber
+        DocumentPageModel(
+            id = 20L,
+            documentId = 1L,
+            pageNumber = 2,
+            ocrText = "نص الصفحة الثانية النظيف بدون أخطاء"
+        ),
+        DocumentPageModel(
+            id = 10L,
+            documentId = 1L,
+            pageNumber = 1,
+            ocrText = "نص خام من الصفحة الأولى"
+        )
+    )
+
+    private fun sampleReviewItems(): List<ReviewItemModel> = listOf(
+        ReviewItemModel(
+            id = 102L,
+            documentId = 1L,
+            pageNumber = 1,
+            category = DiscrepancyCategory.D,
+            ocrText = "كلمة غير واضحة",
+            suggestedText = "كلمة مقترحة",
+            ocrConfidence = 0.45f,
+            geminiConfidence = 0.55f,
+            evidence = "ضبابية في الصورة",
+            bbox = BoundingBox(10f, 120f, 120f, 160f),
+            reviewStatus = ReviewStatus.UNRESOLVED,
+            userText = null,
+            resolvedAt = 5000L,
+            orderIndex = 1
+        ),
+        ReviewItemModel(
+            id = 101L,
+            documentId = 1L,
+            pageNumber = 1,
+            category = DiscrepancyCategory.B,
+            ocrText = "الكتب القيمة",
+            suggestedText = "الكتب القديمة",
+            ocrConfidence = 0.72f,
+            geminiConfidence = 0.95f,
+            evidence = "حرف الدال ظاهر",
+            bbox = BoundingBox(10f, 20f, 120f, 60f),
+            reviewStatus = ReviewStatus.APPROVED_GEMINI,
+            userText = "الكتب القديمة",
+            resolvedAt = 4000L,
+            orderIndex = 0
+        ),
+        ReviewItemModel(
+            id = 103L,
+            documentId = 1L,
+            pageNumber = 1,
+            category = DiscrepancyCategory.C,
+            ocrText = "العبارة الأصلية",
+            suggestedText = "العبارة المقترحة",
+            ocrConfidence = 0.65f,
+            geminiConfidence = 0.80f,
+            evidence = "شك في الحرف الأخير",
+            bbox = BoundingBox(10f, 200f, 150f, 240f),
+            reviewStatus = ReviewStatus.MANUALLY_EDITED,
+            userText = "العبارة المعتمدة يدوياً",
+            resolvedAt = 6000L,
+            orderIndex = 2
+        )
+    )
+
+    @Test
+    fun `assembler preserves page and reading order and selects userText or raw ocrText`() {
+        val plan = WordTextAssembler.buildPlan(
+            document = sampleDocument(),
+            pages = samplePages(),
+            reviewItems = sampleReviewItems(),
+            mode = WordExportMode.MATCH_ORIGINAL
+        )
+
+        assertEquals(2, plan.pages.size)
+        assertEquals(1, plan.pages[0].pageNumber)
+        assertEquals(2, plan.pages[1].pageNumber)
+
+        val page1Segments = plan.pages[0].segments
+        assertEquals(3, page1Segments.size)
+        assertEquals("الكتب القديمة", page1Segments[0].text)
+        assertFalse(page1Segments[0].isUnresolvedHighlight)
+
+        assertEquals("كلمة غير واضحة", page1Segments[1].text)
+        assertTrue(page1Segments[1].isUnresolvedHighlight)
+
+        assertEquals("العبارة المعتمدة يدوياً", page1Segments[2].text)
+        assertFalse(page1Segments[2].isUnresolvedHighlight)
+
+        // Page 2 had no review items -> falls back cleanly to PageEntity.ocrText
+        val page2Segments = plan.pages[1].segments
+        assertEquals(1, page2Segments.size)
+        assertEquals("نص الصفحة الثانية النظيف بدون أخطاء", page2Segments[0].text)
+        assertFalse(page2Segments[0].isUnresolvedHighlight)
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun `generator rejects export when reviewApprovedAt is null`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val generator = WordGenerator()
+        val outFile = generator.buildOutputFile(context, "unapproved")
+        generator.generate(
+            document = sampleDocument(approvedAt = null),
+            pages = samplePages(),
+            reviewItems = sampleReviewItems(),
+            mode = WordExportMode.MATCH_ORIGINAL,
+            outputFile = outFile
+        )
+    }
+
+    @Test
+    fun `generator creates valid RTL docx in Academic mode with highlighted unresolved items`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val generator = WordGenerator()
+        val outFile = generator.buildOutputFile(context, "مخطوطة التراث", nowMillis = 1_700_000_000_000L)
+
+        assertTrue(
+            outFile.absolutePath.contains(Environment.DIRECTORY_DOCUMENTS)
+        )
+
+        generator.generate(
+            document = sampleDocument(),
+            pages = samplePages(),
+            reviewItems = sampleReviewItems(),
+            mode = WordExportMode.ACADEMIC,
+            outputFile = outFile
+        )
+
+        assertTrue(outFile.exists())
+        assertTrue(outFile.length() > 0L)
+
+        FileInputStream(outFile).use { fis ->
+            XWPFDocument(fis).use { doc ->
+                val paragraphs = doc.paragraphs
+                assertTrue(paragraphs.isNotEmpty())
+
+                // Every paragraph has RIGHT alignment and OOXML <w:bidi/>
+                paragraphs.forEach { p ->
+                    assertEquals(ParagraphAlignment.RIGHT, p.alignment)
+                    val pXml = p.ctp.xmlText()
+                    assertTrue(pXml.contains("bidi"))
+                }
+
+                // Title & page headings in Academic mode are bold
+                val titleRun = paragraphs[0].runs.first()
+                assertEquals("مخطوطة التراث", titleRun.text())
+                assertTrue(titleRun.isBold)
+
+                // Approved / manually edited texts appear without unresolved red color
+                val allText = paragraphs.joinToString("\n") { it.text }
+                assertTrue(allText.contains("الكتب القديمة"))
+                assertTrue(allText.contains("العبارة المعتمدة يدوياً"))
+                assertTrue(allText.contains("نص الصفحة الثانية النظيف بدون أخطاء"))
+
+                // Unresolved item run carries yellow highlight + dark red color + <w:rtl/>
+                val unresolvedParagraph = paragraphs.first { it.text.contains("كلمة غير واضحة") }
+                val unresolvedRun = unresolvedParagraph.runs.first()
+                assertEquals(WordGenerator.UNRESOLVED_TEXT_RED_HEX, unresolvedRun.color)
+                val runXml = unresolvedRun.ctr.xmlText()
+                assertTrue(runXml.contains("highlight"))
+                assertTrue(runXml.contains("yellow"))
+                assertTrue(runXml.contains("rtl"))
+            }
+        }
+    }
+}
+Final Reporting (§7)
+Files Added / Modified
+Modified: settings.gradle.kts (JitPack repository), app/build.gradle.kts (POI dependency & packaging excludes), app/src/main/AndroidManifest.xml (FileProvider), DocumentWorkspaceScreen (embeds WordExportSection).
+Added: app/src/main/res/xml/file_paths.xml, WordExportModels.kt, WordTextAssembler.kt, WordGenerator.kt, WordExportViewModel.kt (including WordShareLauncher), WordExportComponents.kt, and WordGeneratorTest.kt.
+Exact Dependencies Added for Apache POI
+implementation("com.github.SUPERCILEX.poi-android:poi:3.17") (from https://jitpack.io)
+implementation("com.fasterxml:aalto-xml:1.3.3") (StAX parser implementation compatible with Android + poi-android:3.17)
+How RTL Was Enforced in Word
+Section level: <w:bidi/> added to sectPr.
+Paragraph level: paragraph.alignment = ParagraphAlignment.RIGHT plus <w:bidi/> added to paragraph.ctp.pPr.
+Run level: <w:rtl/> added to run.ctr.rPr, with Traditional Arabic assigned across FontCharRange.ascii, FontCharRange.hAnsi, and FontCharRange.cs (Complex Script).
+How Unresolved Items Were Highlighted
+Any item with UNRESOLVED, PENDING, or STALE status (including isStale == true) receives a yellow background highlight (<w:highlight w:val="yellow"/> on rPr) paired with dark red text (run.color = "B71C1C") so it stands out immediately in both Microsoft Word and Google Docs.
+How the Share Intent Is Triggered
+The .docx file is written to context.getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS).
+WordShareLauncher.shareDocx resolves a content:// URI via FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file) and launches Intent.createChooser wrapping Intent(Intent.ACTION_SEND) with MIME type application/vnd.openxmlformats-officedocument.wordprocessingml.document, ClipData.newRawUri, and Intent.FLAG_GRANT_READ_URI_PERMISSION.
+Honest Limitations
+No local compile/test run here: Modules 01–05 and the Android SDK are not present in this environment, so WordGenerator and WordGeneratorTest were not compiled or executed locally; you will verify them on your machine.
+POI Android 3.17 footprint & schema pruning: com.github.SUPERCILEX.poi-android:poi:3.17 uses a shrunk OOXML schema jar (hence using XmlCursor for <w:bidi/>, <w:rtl/>, and <w:highlight/> to avoid missing XMLBeans helper classes) and increases APK size; if a runtime XML parser conflict occurs with another dependency, verify aalto-xml exclusions.
+Font availability: Traditional Arabic renders natively in Microsoft Word on Windows/macOS; mobile viewers without that font installed will substitute their default system Arabic font.
+In-place span replacement vs. item blocks: If a page has ReviewItemEntity records covering only part of a page's text rather than full page blocks, WordTextAssembler outputs the page's ordered review items; if PageEntity stores character offsets for inline replacement in your Module 05 schema, adapt WordTextAssembler to splice those spans into page.ocrText.

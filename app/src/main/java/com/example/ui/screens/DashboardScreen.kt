@@ -67,6 +67,8 @@ import com.example.ui.components.ScholarlyInfoBanner
 import com.example.ui.components.SectionHeader
 import com.example.ui.components.formatDateTimeArabic
 import com.example.ui.components.formatFileSizeArabic
+import com.example.ui.theme.AmiriFontFamily
+import com.example.ui.theme.MuharrirTheme
 import com.example.ui.viewmodel.DashboardFilter
 import com.example.ui.viewmodel.DashboardUiState
 
@@ -167,8 +169,8 @@ fun DashboardScreen(
 
             item {
                 ScholarlyInfoBanner(
-                    title = "نطاق المرحلة الحالية (02 / 07)",
-                    body = "توفّر هذه المرحلة الاستيراد الحقيقي لملفات PDF إلى التخزين الخاص للتطبيق، وفهرسة الصفحات وحفظها الدائم عبر قاعدة بيانات Room بحيث تبقى متاحة بعد إغلاق التطبيق أو إعادة تشغيل الجهاز. استخراج النص (OCR) وتحليل Gemini وتصدير Word تُنفّذ في المراحل 03 إلى 07.",
+                    title = "المحرّر — حفظ أمين للنص الأصلي",
+                    body = "يحفظ التطبيق ملفات PDF داخل التخزين الخاص، وينفّذ استخراج النص محلياً (OCR) والتحليل البصري عبر Gemini، مع مراجعة تفاعلية وتصدير Word عربي متكامل دون اختصار أو إعادة صياغة.",
                     icon = Icons.Rounded.Info,
                 )
             }
@@ -181,18 +183,22 @@ private fun HeroHeaderCard(
     onCreateNewTask: () -> Unit,
     onOpenSettings: () -> Unit,
 ) {
+    val ext = MuharrirTheme.extendedColors
     Surface(
         shape = MaterialTheme.shapes.large,
-        color = MaterialTheme.colorScheme.primary,
-        modifier = Modifier.fillMaxWidth(),
+        color = ext.headerGradientStart,
+        border = BorderStroke(1.dp, ext.headerOutline),
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("dashboard_hero_header"),
     ) {
         Box(
             modifier = Modifier
                 .background(
                     Brush.horizontalGradient(
                         colors = listOf(
-                            MaterialTheme.colorScheme.primary,
-                            MaterialTheme.colorScheme.secondary,
+                            ext.headerGradientStart,
+                            ext.headerGradientEnd,
                         ),
                     ),
                 )
@@ -204,30 +210,39 @@ private fun HeroHeaderCard(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.Top,
                 ) {
-                    Column(modifier = Modifier.weight(1f)) {
+                    Row(
+                        modifier = Modifier.weight(1f),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(14.dp),
+                    ) {
                         Surface(
-                            color = Color.White.copy(alpha = 0.16f),
-                            shape = MaterialTheme.shapes.extraSmall,
+                            shape = MaterialTheme.shapes.medium,
+                            border = BorderStroke(1.dp, ext.headerOutline),
+                            modifier = Modifier.size(48.dp),
                         ) {
-                            Text(
-                                text = "المرحلة 02 / 07 — الاستيراد وإدارة الصفحات والتخزين الدائم",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = Color.White,
-                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                            Image(
+                                painter = painterResource(id = R.drawable.img_muharrir_icon_fg),
+                                contentDescription = "شعار المحرّر",
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier.fillMaxSize(),
                             )
                         }
-                        Spacer(modifier = Modifier.height(10.dp))
-                        Text(
-                            text = "مُحَرِّر AI",
-                            style = MaterialTheme.typography.displaySmall,
-                            color = Color.White,
-                            fontWeight = FontWeight.Bold,
-                        )
-                        Text(
-                            text = "تحويل أمين لمستندات PDF العربية المصوّرة إلى ملفات Word قابلة للتعديل",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = Color.White.copy(alpha = 0.9f),
-                        )
+                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Text(
+                                text = "المحرّر",
+                                style = MaterialTheme.typography.displaySmall.copy(
+                                    fontFamily = AmiriFontFamily,
+                                    fontWeight = FontWeight.Bold,
+                                ),
+                                color = ext.onHeader,
+                                modifier = Modifier.testTag("dashboard_app_title"),
+                            )
+                            Text(
+                                text = "تحويل أمين لمستندات PDF العربية المصوّرة إلى ملفات Word قابلة للتعديل",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = ext.onHeaderMuted,
+                            )
+                        }
                     }
                     IconButton(
                         onClick = onOpenSettings,
@@ -238,7 +253,7 @@ private fun HeroHeaderCard(
                         Icon(
                             imageVector = Icons.Rounded.Settings,
                             contentDescription = "فتح الإعدادات",
-                            tint = Color.White,
+                            tint = ext.onHeader,
                         )
                     }
                 }
@@ -272,8 +287,8 @@ private fun HeroHeaderCard(
 
                     OutlinedButton(
                         onClick = onOpenSettings,
-                        border = BorderStroke(1.dp, Color.White.copy(alpha = 0.45f)),
-                        colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White),
+                        border = BorderStroke(1.dp, ext.headerOutline),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = ext.onHeader),
                         modifier = Modifier
                             .heightIn(min = 48.dp)
                             .testTag("dashboard_settings_chip"),

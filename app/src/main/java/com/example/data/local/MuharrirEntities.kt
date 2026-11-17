@@ -47,6 +47,10 @@ data class DocumentEntity(
     val isValidationPassed: Boolean,
     val validationNote: String?,
     val errorMessageAr: String?,
+    val reviewApprovedAt: Long? = null,
+    val exportedDocxPath: String? = null,
+    val exportedMode: String? = null,
+    val exportedAtMillis: Long? = null,
 )
 
 @Entity(
@@ -249,6 +253,20 @@ fun DocumentEntity.toDomain(
         unresolvedItems = actionableItems.count { it.status == ReviewStatus.UNRESOLVED },
     )
 
+    val safeExported = if (exportedDocxPath != null && exportedAtMillis != null) {
+        val safeExportMode = runCatching {
+            ExportMode.valueOf(exportedMode ?: ExportMode.MATCH_ORIGINAL.name)
+        }.getOrDefault(ExportMode.MATCH_ORIGINAL)
+        com.example.domain.model.ExportedDocument(
+            documentId = id,
+            docxFileRef = exportedDocxPath,
+            exportMode = safeExportMode,
+            createdAtMillis = exportedAtMillis,
+        )
+    } else {
+        null
+    }
+
     return DocumentRecord(
         id = id,
         fileName = originalFileName,
@@ -269,6 +287,8 @@ fun DocumentEntity.toDomain(
         pages = pages,
         reviewItems = reviewItems,
         reviewProgress = progress,
+        reviewApprovedAt = reviewApprovedAt,
+        exportedDocument = safeExported,
     )
 }
 
@@ -422,5 +442,9 @@ fun ReviewItemEntity.toDomain(): ReviewItem {
             right = x2.toFloat(),
             bottom = y2.toFloat(),
         ),
+        resolvedAt = resolvedAt,
+        blockIndex = blockIndex,
+        lineIndex = lineIndex,
+        elementIndex = elementIndex,
     )
 }

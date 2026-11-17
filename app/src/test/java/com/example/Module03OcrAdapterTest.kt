@@ -511,6 +511,7 @@ class Module03OcrAdapterTest {
                 MuharrirDatabase.MIGRATION_1_2,
                 MuharrirDatabase.MIGRATION_2_3,
                 MuharrirDatabase.MIGRATION_3_4,
+                MuharrirDatabase.MIGRATION_4_5,
             )
             .allowMainThreadQueries()
             .build()

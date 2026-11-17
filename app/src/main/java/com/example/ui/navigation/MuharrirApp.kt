@@ -1,5 +1,8 @@
 package com.example.ui.navigation
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
@@ -34,6 +37,9 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
@@ -48,10 +54,24 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.height
+import androidx.compose.material3.Button
+import androidx.compose.ui.Alignment
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.viewmodel.compose.LocalViewModelStoreOwner
+import com.example.export.ui.WordExportViewModel
+import com.example.review.ui.ReviewScreen
+import com.example.review.ui.ReviewSummaryScreen
+import com.example.review.ui.ReviewViewModel
 import com.example.ui.screens.DashboardScreen
 import com.example.ui.screens.DocumentWorkspaceScreen
+import com.example.ui.screens.LaunchSplashScreen
 import com.example.ui.screens.NewDocumentScreen
-import com.example.ui.screens.ReviewWorkspaceScreen
 import com.example.ui.screens.SettingsScreen
 import com.example.ui.viewmodel.MuharrirViewModel
 
@@ -60,6 +80,7 @@ object MuharrirRoutes {
     const val ROUTE_NEW_DOCUMENT = "new_document"
     const val ROUTE_WORKSPACE = "workspace"
     const val ROUTE_REVIEW = "review"
+    const val ROUTE_REVIEW_SUMMARY = "review_summary"
     const val ROUTE_SETTINGS = "settings"
 }
 
@@ -134,6 +155,8 @@ fun MuharrirApp(
     val settingsNotice by viewModel.settingsNoticeAr.collectAsStateWithLifecycle()
     val ocrExecutionState by viewModel.ocrExecutionState.collectAsStateWithLifecycle()
     val geminiExecutionState by viewModel.geminiExecutionState.collectAsStateWithLifecycle()
+    val appearancePreferences by viewModel.appearancePreferences.collectAsStateWithLifecycle()
+    var showLaunchSplash by rememberSaveable { mutableStateOf(true) }
 
     val navigateToRoute: (String) -> Unit = { route ->
         navController.navigate(route) {
@@ -145,60 +168,103 @@ fun MuharrirApp(
         }
     }
 
+    val hostOwner = checkNotNull(LocalViewModelStoreOwner.current) {
+        "LocalViewModelStoreOwner is required"
+    }
+
+    val wordExportViewModel: WordExportViewModel = viewModel(
+        viewModelStoreOwner = hostOwner,
+        key = "word_export_vm",
+        factory = object : ViewModelProvider.Factory {
+            @Suppress("UNCHECKED_CAST")
+            override fun <T : ViewModel> create(modelClass: Class<T>): T {
+                return WordExportViewModel(dataGateway = viewModel.wordExportDataGateway) as T
+            }
+        },
+    )
+
+    val activeReviewViewModel: ReviewViewModel? = activeDocument?.let { doc ->
+        viewModel(
+            viewModelStoreOwner = hostOwner,
+            key = "review_vm_${doc.id}",
+            factory = object : ViewModelProvider.Factory {
+                @Suppress("UNCHECKED_CAST")
+                override fun <T : ViewModel> create(modelClass: Class<T>): T {
+                    return ReviewViewModel(
+                        documentId = doc.id,
+                        reviewQueueGateway = viewModel.reviewQueueGateway,
+                        documentReviewGateway = viewModel.documentReviewGateway,
+                        pageBitmapSource = viewModel.pageBitmapSource,
+                    ) as T
+                }
+            },
+        )
+    }
+
+    val isImmersiveReviewRoute = activeReviewViewModel != null && (
+        currentRoute == MuharrirRoutes.ROUTE_REVIEW ||
+            currentRoute == MuharrirRoutes.ROUTE_REVIEW_SUMMARY
+        )
+
+    val isDashboardRoute = currentRoute == MuharrirRoutes.ROUTE_DASHBOARD
+    val showTopBar = !isImmersiveReviewRoute && !isDashboardRoute
+
     val topBarTitle = when (currentRoute) {
-        MuharrirRoutes.ROUTE_DASHBOARD -> "مُحَرِّر AI — لوحة التحكم"
         MuharrirRoutes.ROUTE_NEW_DOCUMENT -> "استيراد مستند PDF"
         MuharrirRoutes.ROUTE_WORKSPACE -> "مساحة عمل المستند"
         MuharrirRoutes.ROUTE_REVIEW -> "مساحة المراجعة"
+        MuharrirRoutes.ROUTE_REVIEW_SUMMARY -> "ملخص المراجعة والاعتماد"
         MuharrirRoutes.ROUTE_SETTINGS -> "الإعدادات"
-        else -> "مُحَرِّر AI"
+        else -> "المحرّر"
     }
 
-    BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
-        val useNavigationRail = maxWidth >= 700.dp
+    Box(modifier = Modifier.fillMaxSize()) {
+        BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+            val useNavigationRail = maxWidth >= 700.dp
 
-        Scaffold(
-            modifier = Modifier.fillMaxSize(),
-            containerColor = MaterialTheme.colorScheme.background,
-            contentWindowInsets = WindowInsets.safeDrawing,
-            topBar = {
-                TopAppBar(
-                    title = {
-                        Text(
-                            text = topBarTitle,
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.Bold,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                    },
-                    navigationIcon = {
-                        if (currentRoute != MuharrirRoutes.ROUTE_DASHBOARD) {
-                            IconButton(
-                                onClick = {
-                                    if (!navController.popBackStack()) {
-                                        navigateToRoute(MuharrirRoutes.ROUTE_DASHBOARD)
-                                    }
-                                },
-                                modifier = Modifier
-                                    .size(48.dp)
-                                    .testTag("topbar_back_button"),
-                            ) {
-                                Icon(
-                                    imageVector = Icons.AutoMirrored.Rounded.ArrowBack,
-                                    contentDescription = "العودة",
+            Scaffold(
+                modifier = Modifier.fillMaxSize(),
+                containerColor = MaterialTheme.colorScheme.background,
+                contentWindowInsets = if (isImmersiveReviewRoute) WindowInsets(0, 0, 0, 0) else WindowInsets.safeDrawing,
+                topBar = {
+                    if (showTopBar) {
+                        TopAppBar(
+                            title = {
+                                Text(
+                                    text = topBarTitle,
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.Bold,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
                                 )
-                            }
-                        }
-                    },
-                    colors = TopAppBarDefaults.topAppBarColors(
-                        containerColor = MaterialTheme.colorScheme.surface,
-                        titleContentColor = MaterialTheme.colorScheme.onSurface,
-                    ),
-                )
-            },
+                            },
+                            navigationIcon = {
+                                IconButton(
+                                    onClick = {
+                                        if (!navController.popBackStack()) {
+                                            navigateToRoute(MuharrirRoutes.ROUTE_DASHBOARD)
+                                        }
+                                    },
+                                    modifier = Modifier
+                                        .size(48.dp)
+                                        .testTag("topbar_back_button"),
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.AutoMirrored.Rounded.ArrowBack,
+                                        contentDescription = "العودة",
+                                    )
+                                }
+                            },
+                            colors = TopAppBarDefaults.topAppBarColors(
+                                containerColor = MaterialTheme.colorScheme.surface,
+                                titleContentColor = MaterialTheme.colorScheme.onSurface,
+                                navigationIconContentColor = MaterialTheme.colorScheme.onSurface,
+                            ),
+                        )
+                    }
+                },
             bottomBar = {
-                if (!useNavigationRail) {
+                if (!useNavigationRail && !isImmersiveReviewRoute) {
                     NavigationBar(
                         containerColor = MaterialTheme.colorScheme.surface,
                     ) {
@@ -233,7 +299,7 @@ fun MuharrirApp(
                     .fillMaxSize()
                     .padding(innerPadding),
             ) {
-                if (useNavigationRail) {
+                if (useNavigationRail && !isImmersiveReviewRoute) {
                     NavigationRail(
                         modifier = Modifier.fillMaxHeight(),
                         containerColor = MaterialTheme.colorScheme.surface,
@@ -323,8 +389,10 @@ fun MuharrirApp(
                             onRetrySingleOcrPage = viewModel::retrySingleOcrPage,
                             onStartGeminiAnalysis = viewModel::startGeminiAnalysis,
                             onPauseGeminiAnalysis = viewModel::pauseGeminiAnalysis,
+                            wordExportViewModel = wordExportViewModel,
                             onOpenSettings = { navigateToRoute(MuharrirRoutes.ROUTE_SETTINGS) },
                             onOpenReviewWorkspace = { navigateToRoute(MuharrirRoutes.ROUTE_REVIEW) },
+                            onOpenReviewSummary = { navController.navigate(MuharrirRoutes.ROUTE_REVIEW_SUMMARY) },
                             onCreateNewDocument = {
                                 viewModel.clearReplacementMode()
                                 navigateToRoute(MuharrirRoutes.ROUTE_NEW_DOCUMENT)
@@ -341,22 +409,60 @@ fun MuharrirApp(
                     }
 
                     composable(MuharrirRoutes.ROUTE_REVIEW) {
-                        ReviewWorkspaceScreen(
-                            document = activeDocument,
-                            previewBitmap = workspacePreviewBitmap,
-                            previewPageIndex = workspacePreviewPage,
-                            onRequestPreviewPage = viewModel::loadWorkspacePreviewPage,
-                        )
+                        val reviewVm = activeReviewViewModel
+                        if (reviewVm == null) {
+                            EmptyNoActiveDocumentReviewState(
+                                onGoToDashboard = { navigateToRoute(MuharrirRoutes.ROUTE_DASHBOARD) },
+                            )
+                        } else {
+                            ReviewScreen(
+                                viewModel = reviewVm,
+                                onNavigateBack = {
+                                    if (!navController.popBackStack()) {
+                                        navigateToRoute(MuharrirRoutes.ROUTE_WORKSPACE)
+                                    }
+                                },
+                                onOpenSummary = {
+                                    navController.navigate(MuharrirRoutes.ROUTE_REVIEW_SUMMARY) {
+                                        launchSingleTop = true
+                                    }
+                                },
+                            )
+                        }
+                    }
+
+                    composable(MuharrirRoutes.ROUTE_REVIEW_SUMMARY) {
+                        val reviewVm = activeReviewViewModel
+                        if (reviewVm == null) {
+                            EmptyNoActiveDocumentReviewState(
+                                onGoToDashboard = { navigateToRoute(MuharrirRoutes.ROUTE_DASHBOARD) },
+                            )
+                        } else {
+                            ReviewSummaryScreen(
+                                viewModel = reviewVm,
+                                onNavigateBackToReview = {
+                                    if (!navController.popBackStack()) {
+                                        navigateToRoute(MuharrirRoutes.ROUTE_REVIEW)
+                                    }
+                                },
+                                onNavigateToWorkspaceForExport = {
+                                    navigateToRoute(MuharrirRoutes.ROUTE_WORKSPACE)
+                                },
+                            )
+                        }
                     }
 
                     composable(MuharrirRoutes.ROUTE_SETTINGS) {
                         SettingsScreen(
                             preferences = preferences,
+                            appearancePreferences = appearancePreferences,
                             geminiKeys = geminiKeys,
                             geminiUsageStats = geminiUsageStats,
                             testingKeyId = testingKeyId,
                             noticeMessageAr = settingsNotice,
                             onDismissNotice = viewModel::dismissSettingsNotice,
+                            onSelectAppearanceMode = viewModel::setAppearanceMode,
+                            onSelectThemePalette = viewModel::setThemePalette,
                             onAddGeminiKey = viewModel::addGeminiApiKey,
                             onTestGeminiKey = viewModel::testGeminiApiKey,
                             onToggleGeminiKey = viewModel::toggleGeminiApiKey,
@@ -370,6 +476,49 @@ fun MuharrirApp(
                         )
                     }
                 }
+            }
+        }
+        }
+
+        AnimatedVisibility(
+            visible = showLaunchSplash,
+            exit = fadeOut(animationSpec = tween(durationMillis = 240)),
+        ) {
+            LaunchSplashScreen(
+                onFinished = { showLaunchSplash = false },
+            )
+        }
+    }
+}
+
+@Composable
+private fun EmptyNoActiveDocumentReviewState(
+    onGoToDashboard: () -> Unit,
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(24.dp)
+            .testTag("empty_review_state"),
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Text(
+                text = "لا يوجد مستند محدد للمراجعة",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold,
+            )
+            Text(
+                text = "اختر مستنداً من الرئيسية أو استورد ملف PDF جديداً ثم شغّل OCR وتحليل Gemini للبدء.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            Button(onClick = onGoToDashboard) {
+                Text("الانتقال إلى الرئيسية")
             }
         }
     }

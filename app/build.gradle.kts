@@ -68,6 +68,17 @@ android {
     includeInApk = false
     includeInBundle = true
   }
+  packaging {
+    resources {
+      excludes += setOf(
+        "META-INF/DEPENDENCIES",
+        "META-INF/LICENSE",
+        "META-INF/LICENSE.txt",
+        "META-INF/NOTICE",
+        "META-INF/NOTICE.txt"
+      )
+    }
+  }
 }
 
 // Configure the Secrets Gradle Plugin to use .env and .env.example files
@@ -130,6 +141,7 @@ dependencies {
   // implementation(libs.play.services.location)
   implementation(libs.retrofit)
   implementation(libs.tesseract4android)
+  implementation(libs.poi.android)
   testImplementation(libs.androidx.compose.ui.test.junit4)
   testImplementation(libs.androidx.core)
   testImplementation(libs.androidx.junit)

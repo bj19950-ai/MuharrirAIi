@@ -139,6 +139,15 @@ class MuharrirRepository(
     private val apiKeySlotDao = database.apiKeySlotDao()
     private val comparisonEngine = OcrGeminiComparisonEngine(database)
 
+    val reviewQueueGateway: com.example.review.model.ReviewQueueGateway =
+        MuharrirReviewQueueGateway(database)
+    val documentReviewGateway: com.example.review.model.DocumentReviewGateway =
+        MuharrirDocumentReviewGateway(database)
+    val pageBitmapSource: com.example.review.model.PageBitmapSource =
+        MuharrirPageBitmapSource(database, storage, pageEngine)
+    val wordExportDataGateway: com.example.export.model.WordExportDataGateway =
+        MuharrirWordExportDataGateway(database)
+
     val documents: Flow<List<DocumentRecord>> =
         documentDao.observeActiveDocuments().map { entities ->
             entities.map { it.toDomain() }
@@ -957,10 +966,13 @@ class MuharrirRepository(
         val totalAnalyzedNow = getDocumentById(documentId)?.pages?.count { it.geminiAnalysis != null }
             ?: (alreadyAnalyzedCount + analyzedNow)
 
-        val finalStatus = if (failedCount > 0 && analyzedNow == 0) {
-            DocumentStatus.PAUSED
-        } else {
-            DocumentStatus.PROCESSING
+        val countsAfterAnalysis = reviewItemDao.countByStatus(documentId, includeAgreements = false)
+        val hasPendingReview = (countsAfterAnalysis[ReviewStatus.PENDING] ?: 0) > 0 ||
+            (countsAfterAnalysis[ReviewStatus.STALE] ?: 0) > 0
+        val finalStatus = when {
+            failedCount > 0 && analyzedNow == 0 -> DocumentStatus.PAUSED
+            hasPendingReview -> DocumentStatus.NEEDS_REVIEW
+            else -> DocumentStatus.PROCESSING
         }
         documentDao.updateProcessingProgress(
             documentId = documentId,
@@ -1113,14 +1125,16 @@ class MuharrirRepository(
             PipelineStageInfo(
                 id = "stage_review",
                 titleAr = "المراجعة البشرية التفاعلية",
-                subtitleAr = "مراجعة الكلمات غير المحسومة واعتماد التصحيحات أو تعديلها يدوياً.",
-                availability = StageModuleAvailability.PLANNED_MODULE_06,
+                subtitleAr = "مراجعة الكلمات غير المحسومة واعتماد التصحيحات أو تعديلها يدوياً مع عرض الصورة الأصلية المكبّرة.",
+                availability = StageModuleAvailability.READY_IN_MODULE_06,
+                isCompletedLocally = document?.reviewApprovedAt != null,
             ),
             PipelineStageInfo(
                 id = "stage_docx",
                 titleAr = "إنشاء ملف Word عربي (DOCX)",
-                subtitleAr = "توليد مستند DOCX داعم للاتجاه RTL مع تمييز الكلمات غير المحسومة.",
-                availability = StageModuleAvailability.PLANNED_MODULE_07,
+                subtitleAr = "توليد مستند DOCX داعم للاتجاه RTL مع تمييز الكلمات غير المحسومة ومشاركته عبر النظام.",
+                availability = StageModuleAvailability.READY_IN_MODULE_07,
+                isCompletedLocally = document?.exportedDocument != null,
             ),
         )
     }
