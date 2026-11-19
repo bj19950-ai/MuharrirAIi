@@ -34,9 +34,16 @@ class ReviewViewModel(
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
     private val defaultDispatcher: CoroutineDispatcher = Dispatchers.Default,
     private val clock: () -> Long = { System.currentTimeMillis() },
+    initialAutoAcceptHighConfidence: Boolean = false,
+    private val onAutoAcceptHighConfidenceChanged: (Boolean) -> Unit = {},
 ) : ViewModel() {
 
-    private val _uiState = MutableStateFlow(ReviewUiState(documentId = documentId))
+    private val _uiState = MutableStateFlow(
+        ReviewUiState(
+            documentId = documentId,
+            autoAcceptHighConfidence = initialAutoAcceptHighConfidence,
+        ),
+    )
     val uiState: StateFlow<ReviewUiState> = _uiState.asStateFlow()
 
     private val pageBitmapCache = mutableMapOf<Int, Bitmap>()
@@ -140,26 +147,33 @@ class ReviewViewModel(
         return when (filter) {
             ReviewFilter.ALL -> items.filter { item ->
                 val matchesAgreement = includeAgreement || item.category != DiscrepancyCategory.A
-                val isMinorDifference = ignoreMinorDifferences &&
-                    item.category == DiscrepancyCategory.B &&
-                    item.suggestedText != null &&
-                    normalizeMinorArabic(item.ocrText) == normalizeMinorArabic(item.suggestedText)
+                val isMinorDifference = ignoreMinorDifferences && isMinorDifferenceItem(item)
                 matchesAgreement && !isMinorDifference
             }
-            ReviewFilter.DISCREPANCY_ONLY -> items.filter { it.category == DiscrepancyCategory.B }
+            ReviewFilter.DISCREPANCY_ONLY -> items.filter { item ->
+                item.category == DiscrepancyCategory.B &&
+                    !(ignoreMinorDifferences && isMinorDifferenceItem(item))
+            }
             ReviewFilter.UNRESOLVED_ONLY -> items.filter { it.reviewStatus == ReviewStatus.UNRESOLVED }
-            ReviewFilter.PENDING_ONLY -> items.filter {
-                it.reviewStatus == ReviewStatus.PENDING || it.isStale
+            ReviewFilter.PENDING_ONLY -> items.filter { item ->
+                (item.reviewStatus == ReviewStatus.PENDING || item.isStale) &&
+                    !(ignoreMinorDifferences && isMinorDifferenceItem(item))
             }
             ReviewFilter.IGNORED_ONLY -> items.filter { it.reviewStatus == ReviewStatus.IGNORED }
         }
     }
+
+    private fun isMinorDifferenceItem(item: ReviewItemModel): Boolean =
+        item.category == DiscrepancyCategory.B &&
+            !item.suggestedText.isNullOrBlank() &&
+            normalizeMinorArabic(item.ocrText) == normalizeMinorArabic(item.suggestedText)
 
     private fun normalizeMinorArabic(text: String): String {
         return text
             .replace(Regex("[أإآ]"), "ا")
             .replace('ة', 'ه')
             .replace('ى', 'ي')
+            .replace(Regex("\\s+"), "")
             .trim()
     }
 
@@ -715,6 +729,157 @@ class ReviewViewModel(
         }
     }
 
+    fun requestBulkApproveGemini() {
+        if (_uiState.value.pendingGeminiApproveCount <= 0) return
+        _uiState.update { it.copy(showBulkApproveDialog = true, errorMessage = null) }
+    }
+
+    fun dismissBulkApproveDialog() {
+        _uiState.update { it.copy(showBulkApproveDialog = false) }
+    }
+
+    fun confirmBulkApproveGemini() {
+        val snapshot = _uiState.value
+        val targets = snapshot.allItems.filter {
+            it.category != DiscrepancyCategory.A &&
+                it.reviewStatus == ReviewStatus.PENDING &&
+                !it.suggestedText.isNullOrBlank()
+        }
+        if (targets.isEmpty()) {
+            _uiState.update { it.copy(showBulkApproveDialog = false) }
+            return
+        }
+        approveItemsBatch(
+            targetItems = targets,
+            successMessage = "تم قبول ${targets.size} اقتراحاً من Gemini.",
+            dismissBulkDialog = true,
+        )
+    }
+
+    fun syncAutoAcceptHighConfidence(enabled: Boolean) {
+        if (_uiState.value.autoAcceptHighConfidence != enabled) {
+            _uiState.update { it.copy(autoAcceptHighConfidence = enabled) }
+        }
+    }
+
+    fun toggleAutoAcceptHighConfidence(enabled: Boolean) {
+        onAutoAcceptHighConfidenceChanged(enabled)
+        _uiState.update { it.copy(autoAcceptHighConfidence = enabled, errorMessage = null) }
+        if (!enabled) return
+
+        val highConfidenceTargets = _uiState.value.allItems.filter { item ->
+            item.category == DiscrepancyCategory.B &&
+                item.reviewStatus == ReviewStatus.PENDING &&
+                !item.suggestedText.isNullOrBlank() &&
+                item.ocrText.trim() != item.suggestedText.trim() &&
+                (item.geminiConfidence ?: 0f) > HIGH_CONFIDENCE_THRESHOLD
+        }
+        if (highConfidenceTargets.isNotEmpty()) {
+            approveItemsBatch(
+                targetItems = highConfidenceTargets,
+                successMessage = "تم تفعيل القبول التلقائي واعتماد ${highConfidenceTargets.size} اقتراحاً عالي الثقة.",
+                dismissBulkDialog = false,
+            )
+        }
+    }
+
+    private fun approveItemsBatch(
+        targetItems: List<ReviewItemModel>,
+        successMessage: String,
+        dismissBulkDialog: Boolean,
+    ) {
+        val snapshot = _uiState.value
+        val targetIds = targetItems.map { it.id }
+        val targetIdSet = targetIds.toSet()
+        val now = clock()
+
+        viewModelScope.launch {
+            _uiState.update {
+                it.copy(
+                    isSaving = true,
+                    showBulkApproveDialog = if (dismissBulkDialog) false else it.showBulkApproveDialog,
+                    savedConfirmationVisible = false,
+                    confirmationMessage = null,
+                    errorMessage = null,
+                )
+            }
+            try {
+                reviewQueueGateway.approveAllPendingGemini(
+                    documentId = documentId,
+                    itemIds = targetIds,
+                    resolvedAt = now,
+                )
+
+                val updatedAll = snapshot.allItems.map { item ->
+                    if (item.id in targetIdSet) {
+                        item.copy(
+                            reviewStatus = ReviewStatus.APPROVED_GEMINI,
+                            userText = item.suggestedText,
+                            resolvedAt = now,
+                            isStale = false,
+                            staleNoteAr = null,
+                        )
+                    } else {
+                        item
+                    }
+                }
+                val updatedFiltered = applyFilter(
+                    items = updatedAll,
+                    filter = snapshot.selectedFilter,
+                    includeAgreement = snapshot.includeAgreementInAll,
+                    ignoreMinorDifferences = snapshot.ignoreMinorDifferences,
+                )
+                val targetIndex = resolveTargetIndex(updatedFiltered, snapshot.currentItem?.id, snapshot.currentIndex)
+                val resolvedCurrent = updatedFiltered.getOrNull(targetIndex)
+                if (resolvedCurrent != null) {
+                    savedStateHandle[KEY_CURRENT_ITEM_ID] = resolvedCurrent.id
+                    ReviewPositionStore.setLastItemId(documentId, resolvedCurrent.id)
+                }
+
+                _uiState.update {
+                    it.copy(
+                        isSaving = false,
+                        showBulkApproveDialog = false,
+                        allItems = updatedAll,
+                        filteredItems = updatedFiltered,
+                        currentItem = resolvedCurrent,
+                        currentIndex = targetIndex,
+                        editedText = resolvedCurrent?.let(ReviewArabicFormatter::initialApprovedText).orEmpty(),
+                        isManualEditEnabled = false,
+                        savedConfirmationVisible = true,
+                        confirmationMessage = successMessage,
+                        errorMessage = null,
+                    )
+                }
+
+                if (resolvedCurrent != null) {
+                    ensureBitmapAndCrop(resolvedCurrent)
+                } else {
+                    lastLoadedPageNumber = null
+                    lastCroppedKey = null
+                    _uiState.update {
+                        it.copy(
+                            pageBitmap = null,
+                            enlargedCropBitmap = null,
+                            isBitmapLoading = false,
+                            bitmapLoadError = false,
+                        )
+                    }
+                }
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (_: Exception) {
+                _uiState.value = snapshot.copy(
+                    isSaving = false,
+                    showBulkApproveDialog = false,
+                    savedConfirmationVisible = false,
+                    confirmationMessage = null,
+                    errorMessage = SAVE_ERROR_MESSAGE,
+                )
+            }
+        }
+    }
+
     fun dismissFeedbackBanner() {
         _uiState.update {
             it.copy(
@@ -727,6 +892,7 @@ class ReviewViewModel(
 
     companion object {
         private const val KEY_CURRENT_ITEM_ID = "review_current_item_id"
+        private const val HIGH_CONFIDENCE_THRESHOLD = 0.90f
         const val SAVE_ERROR_MESSAGE = "تعذّر حفظ قرارك. لم يتم تسجيل التغيير. حاول مرة أخرى."
     }
 }

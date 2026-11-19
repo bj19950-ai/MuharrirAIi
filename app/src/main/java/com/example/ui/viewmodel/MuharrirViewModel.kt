@@ -25,6 +25,7 @@ import com.example.domain.model.OcrEngineType
 import com.example.domain.model.PipelineStageInfo
 import com.example.domain.model.ProcessingPreferences
 import com.example.domain.ocr.OcrAvailabilityResult
+import com.example.review.model.SmartReviewPreferencesStore
 import com.example.ui.theme.AppThemePalette
 import com.example.ui.theme.AppearanceMode
 import com.example.ui.theme.AppearancePreferences
@@ -135,6 +136,9 @@ class MuharrirViewModel(
 
     private val appearanceStore = AppearancePreferencesStore.getInstance(application)
     val appearancePreferences: StateFlow<AppearancePreferences> = appearanceStore.preferences
+
+    private val smartReviewStore = SmartReviewPreferencesStore.getInstance(application)
+    val autoAcceptHighConfidenceGemini: StateFlow<Boolean> = smartReviewStore.autoAcceptHighConfidence
 
     private val _selectedFilter = MutableStateFlow(DashboardFilter.ALL)
     private val _selectedDocumentId = MutableStateFlow<String?>(null)
@@ -762,6 +766,10 @@ class MuharrirViewModel(
         appearanceStore.setThemePalette(palette)
     }
 
+    fun setAutoAcceptHighConfidenceGemini(enabled: Boolean) {
+        smartReviewStore.setAutoAcceptHighConfidenceEnabled(enabled)
+    }
+
     fun addGeminiApiKey(label: String, rawApiKey: String) {
         viewModelScope.launch {
             val result = repository.addGeminiKey(label, rawApiKey)
@@ -804,8 +812,19 @@ class MuharrirViewModel(
         viewModelScope.launch { repository.selectGeminiModel(modelId) }
     }
 
-    fun startGeminiAnalysis(documentId: String, singlePageId: String? = null) {
+    fun startGeminiAnalysis(
+        documentId: String,
+        singlePageId: String? = null,
+        startPage: Int? = null,
+        endPage: Int? = null,
+    ) {
         if (_geminiExecutionState.value.isRunning) return
+        val storedRange = _documentPageRanges.value[documentId]
+        val effectiveStart = (startPage ?: storedRange?.first ?: 1).coerceAtLeast(1)
+        val effectiveEnd = (endPage ?: storedRange?.last ?: Int.MAX_VALUE).coerceAtLeast(effectiveStart)
+        if (startPage != null && endPage != null) {
+            _documentPageRanges.update { it + (documentId to (effectiveStart..effectiveEnd)) }
+        }
         activeGeminiJob = viewModelScope.launch {
             _geminiExecutionState.value = GeminiExecutionUiState(
                 isRunning = true,
@@ -815,6 +834,8 @@ class MuharrirViewModel(
                 val outcome = repository.runGeminiAnalysis(
                     documentId = documentId,
                     singlePageId = singlePageId,
+                    startPage = effectiveStart,
+                    endPage = effectiveEnd,
                     onProgress = { progress ->
                         _geminiExecutionState.value = GeminiExecutionUiState(
                             isRunning = true,

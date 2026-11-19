@@ -831,6 +831,233 @@ class Module06ReviewTest {
         assertEquals(listOf(21L, 22L, 23L), vm.uiState.value.filteredItems.map { it.id })
     }
 
+    @Test
+    fun `ignoreMinorDifferences strips spaces along with hamzas and taa marbuta across queue filters`() = runTest {
+        val fakeQueue = FakeReviewQueueGateway(
+            listOf(
+                ReviewItemModel(
+                    id = 31L,
+                    documentId = "doc-spaces",
+                    pageNumber = 1,
+                    category = DiscrepancyCategory.B,
+                    ocrText = "ال التزام   المدنى",
+                    suggestedText = "الالتزام المدني",
+                    ocrConfidence = 0.86f,
+                    geminiConfidence = 0.92f,
+                    evidence = "فارق مسافات وألف مقصورة",
+                    bbox = null,
+                    reviewStatus = ReviewStatus.PENDING,
+                    userText = null,
+                    resolvedAt = null,
+                    orderIndex = 0,
+                ),
+                ReviewItemModel(
+                    id = 32L,
+                    documentId = "doc-spaces",
+                    pageNumber = 1,
+                    category = DiscrepancyCategory.B,
+                    ocrText = "الرهن",
+                    suggestedText = "الكفالة",
+                    ocrConfidence = 0.80f,
+                    geminiConfidence = 0.94f,
+                    evidence = "فرق لفظي حقيقي",
+                    bbox = null,
+                    reviewStatus = ReviewStatus.PENDING,
+                    userText = null,
+                    resolvedAt = null,
+                    orderIndex = 1,
+                ),
+            ),
+        )
+        val fakeDoc = FakeDocumentReviewGateway("doc-spaces", "مسافات.pdf")
+        val fakeBitmaps = object : PageBitmapSource {
+            override suspend fun loadPageBitmap(documentId: String, pageNumber: Int): Bitmap? = null
+        }
+
+        val vm = ReviewViewModel(
+            documentId = "doc-spaces",
+            reviewQueueGateway = fakeQueue,
+            documentReviewGateway = fakeDoc,
+            pageBitmapSource = fakeBitmaps,
+            savedStateHandle = SavedStateHandle(),
+            ioDispatcher = mainDispatcher,
+            defaultDispatcher = mainDispatcher,
+        )
+        advanceUntilIdle()
+
+        vm.toggleIgnoreMinorDifferences()
+        advanceUntilIdle()
+
+        assertEquals(listOf(32L), vm.uiState.value.filteredItems.map { it.id })
+
+        vm.selectFilter(ReviewFilter.DISCREPANCY_ONLY)
+        advanceUntilIdle()
+        assertEquals(listOf(32L), vm.uiState.value.filteredItems.map { it.id })
+
+        vm.selectFilter(ReviewFilter.PENDING_ONLY)
+        advanceUntilIdle()
+        assertEquals(listOf(32L), vm.uiState.value.filteredItems.map { it.id })
+    }
+
+    @Test
+    fun `bulk approve approves all pending items with non-blank suggestions and updates UI and gateway`() = runTest {
+        val fakeQueue = FakeReviewQueueGateway(
+            listOf(
+                ReviewItemModel(
+                    id = 41L,
+                    documentId = "doc-bulk",
+                    pageNumber = 1,
+                    category = DiscrepancyCategory.B,
+                    ocrText = "القضاه",
+                    suggestedText = "القضاة",
+                    ocrConfidence = 0.88f,
+                    geminiConfidence = 0.93f,
+                    evidence = "تاء مربوطة",
+                    bbox = null,
+                    reviewStatus = ReviewStatus.PENDING,
+                    userText = null,
+                    resolvedAt = null,
+                    orderIndex = 0,
+                ),
+                ReviewItemModel(
+                    id = 42L,
+                    documentId = "doc-bulk",
+                    pageNumber = 1,
+                    category = DiscrepancyCategory.B,
+                    ocrText = "المدينه",
+                    suggestedText = "المدينة",
+                    ocrConfidence = 0.84f,
+                    geminiConfidence = 0.89f,
+                    evidence = "تاء مربوطة",
+                    bbox = null,
+                    reviewStatus = ReviewStatus.PENDING,
+                    userText = null,
+                    resolvedAt = null,
+                    orderIndex = 1,
+                ),
+                ReviewItemModel(
+                    id = 43L,
+                    documentId = "doc-bulk",
+                    pageNumber = 1,
+                    category = DiscrepancyCategory.D,
+                    ocrText = "مطموس",
+                    suggestedText = null,
+                    ocrConfidence = 0.35f,
+                    geminiConfidence = 0.40f,
+                    evidence = "لا يوجد اقتراح",
+                    bbox = null,
+                    reviewStatus = ReviewStatus.PENDING,
+                    userText = null,
+                    resolvedAt = null,
+                    orderIndex = 2,
+                ),
+            ),
+        )
+        val fakeDoc = FakeDocumentReviewGateway("doc-bulk", "جماعي.pdf")
+        val fakeBitmaps = object : PageBitmapSource {
+            override suspend fun loadPageBitmap(documentId: String, pageNumber: Int): Bitmap? = null
+        }
+
+        val vm = ReviewViewModel(
+            documentId = "doc-bulk",
+            reviewQueueGateway = fakeQueue,
+            documentReviewGateway = fakeDoc,
+            pageBitmapSource = fakeBitmaps,
+            savedStateHandle = SavedStateHandle(),
+            ioDispatcher = mainDispatcher,
+            defaultDispatcher = mainDispatcher,
+            clock = { 99999L },
+        )
+        advanceUntilIdle()
+
+        assertEquals(2, vm.uiState.value.pendingGeminiApproveCount)
+        vm.requestBulkApproveGemini()
+        assertTrue(vm.uiState.value.showBulkApproveDialog)
+
+        vm.confirmBulkApproveGemini()
+        advanceUntilIdle()
+
+        assertFalse(vm.uiState.value.showBulkApproveDialog)
+        val persisted = fakeQueue.itemsFlow.value
+        assertEquals(ReviewStatus.APPROVED_GEMINI, persisted.first { it.id == 41L }.reviewStatus)
+        assertEquals("القضاة", persisted.first { it.id == 41L }.userText)
+        assertEquals(ReviewStatus.APPROVED_GEMINI, persisted.first { it.id == 42L }.reviewStatus)
+        assertEquals("المدينة", persisted.first { it.id == 42L }.userText)
+        // Item without suggestion stays PENDING
+        assertEquals(ReviewStatus.PENDING, persisted.first { it.id == 43L }.reviewStatus)
+
+        assertEquals(2, vm.uiState.value.stats.approvedGemini)
+        assertEquals(1, vm.uiState.value.stats.remaining)
+        assertTrue(vm.uiState.value.savedConfirmationVisible)
+    }
+
+    @Test
+    fun `toggleAutoAcceptHighConfidence persists preference and auto-approves high confidence pending corrections`() = runTest {
+        var persistedToggle = false
+        val fakeQueue = FakeReviewQueueGateway(
+            listOf(
+                ReviewItemModel(
+                    id = 51L,
+                    documentId = "doc-auto",
+                    pageNumber = 1,
+                    category = DiscrepancyCategory.B,
+                    ocrText = "الحكومه",
+                    suggestedText = "الحكومة",
+                    ocrConfidence = 0.85f,
+                    geminiConfidence = 0.96f,
+                    evidence = "ثقة عالية جداً",
+                    bbox = null,
+                    reviewStatus = ReviewStatus.PENDING,
+                    userText = null,
+                    resolvedAt = null,
+                    orderIndex = 0,
+                ),
+                ReviewItemModel(
+                    id = 52L,
+                    documentId = "doc-auto",
+                    pageNumber = 1,
+                    category = DiscrepancyCategory.B,
+                    ocrText = "المؤجر",
+                    suggestedText = "المستأجر",
+                    ocrConfidence = 0.80f,
+                    geminiConfidence = 0.88f,
+                    evidence = "أقل من 90%",
+                    bbox = null,
+                    reviewStatus = ReviewStatus.PENDING,
+                    userText = null,
+                    resolvedAt = null,
+                    orderIndex = 1,
+                ),
+            ),
+        )
+        val fakeDoc = FakeDocumentReviewGateway("doc-auto", "ثقة_عالية.pdf")
+        val fakeBitmaps = object : PageBitmapSource {
+            override suspend fun loadPageBitmap(documentId: String, pageNumber: Int): Bitmap? = null
+        }
+
+        val vm = ReviewViewModel(
+            documentId = "doc-auto",
+            reviewQueueGateway = fakeQueue,
+            documentReviewGateway = fakeDoc,
+            pageBitmapSource = fakeBitmaps,
+            savedStateHandle = SavedStateHandle(),
+            ioDispatcher = mainDispatcher,
+            defaultDispatcher = mainDispatcher,
+            clock = { 77777L },
+            onAutoAcceptHighConfidenceChanged = { persistedToggle = it },
+        )
+        advanceUntilIdle()
+
+        vm.toggleAutoAcceptHighConfidence(true)
+        advanceUntilIdle()
+
+        assertTrue(persistedToggle)
+        assertTrue(vm.uiState.value.autoAcceptHighConfidence)
+        assertEquals(ReviewStatus.APPROVED_GEMINI, fakeQueue.itemsFlow.value.first { it.id == 51L }.reviewStatus)
+        assertEquals("الحكومة", fakeQueue.itemsFlow.value.first { it.id == 51L }.userText)
+        assertEquals(ReviewStatus.PENDING, fakeQueue.itemsFlow.value.first { it.id == 52L }.reviewStatus)
+    }
+
     private class FakeReviewQueueGateway(initialItems: List<ReviewItemModel>) : ReviewQueueGateway {
         val itemsFlow = MutableStateFlow(initialItems)
         var shouldFailNextSave = false
@@ -892,6 +1119,30 @@ class Module06ReviewTest {
                 if (item.id == itemId) {
                     item.copy(
                         reviewStatus = ReviewStatus.PENDING,
+                        isStale = false,
+                        staleNoteAr = null,
+                    )
+                } else {
+                    item
+                }
+            }
+        }
+
+        override suspend fun approveAllPendingGemini(
+            documentId: String,
+            itemIds: List<Long>,
+            resolvedAt: Long,
+        ) {
+            if (shouldFailNextSave) {
+                throw IllegalStateException("Simulated disk error")
+            }
+            val idSet = itemIds.toSet()
+            itemsFlow.value = itemsFlow.value.map { item ->
+                if (item.id in idSet && !item.suggestedText.isNullOrBlank()) {
+                    item.copy(
+                        reviewStatus = ReviewStatus.APPROVED_GEMINI,
+                        userText = item.suggestedText,
+                        resolvedAt = resolvedAt,
                         isStale = false,
                         staleNoteAr = null,
                     )

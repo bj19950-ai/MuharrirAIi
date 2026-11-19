@@ -104,6 +104,8 @@ fun SettingsScreen(
     onToggleHighlightUnresolved: (Boolean) -> Unit,
     onToggleAutoSave: (Boolean) -> Unit,
     onToggleResumeAfterInterruption: (Boolean) -> Unit,
+    autoAcceptHighConfidenceGemini: Boolean = false,
+    onToggleAutoAcceptHighConfidenceGemini: (Boolean) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     var showAddKeyDialog by remember { mutableStateOf(false) }
@@ -257,6 +259,8 @@ fun SettingsScreen(
                     preferences = preferences,
                     onToggleAutoSave = onToggleAutoSave,
                     onToggleResume = onToggleResumeAfterInterruption,
+                    autoAcceptHighConfidenceGemini = autoAcceptHighConfidenceGemini,
+                    onToggleAutoAcceptHighConfidenceGemini = onToggleAutoAcceptHighConfidenceGemini,
                 )
             }
 
@@ -712,6 +716,8 @@ private fun ProcessingPreferencesCard(
     preferences: ProcessingPreferences,
     onToggleAutoSave: (Boolean) -> Unit,
     onToggleResume: (Boolean) -> Unit,
+    autoAcceptHighConfidenceGemini: Boolean,
+    onToggleAutoAcceptHighConfidenceGemini: (Boolean) -> Unit,
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -722,6 +728,32 @@ private fun ProcessingPreferencesCard(
             modifier = Modifier.padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "القبول التلقائي لاقتراحات Gemini عالية الثقة",
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Medium,
+                    )
+                    Text(
+                        text = "اعتماد تصحيحات Gemini تلقائياً دون مراجعة يدوية عندما تتجاوز نسبة الثقة 90%.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Switch(
+                    checked = autoAcceptHighConfidenceGemini,
+                    onCheckedChange = onToggleAutoAcceptHighConfidenceGemini,
+                    modifier = Modifier.testTag("settings_auto_accept_high_confidence_switch"),
+                )
+            }
+
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,

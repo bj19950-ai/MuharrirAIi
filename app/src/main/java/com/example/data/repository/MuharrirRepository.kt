@@ -47,6 +47,7 @@ import com.example.domain.model.ReviewItem
 import com.example.domain.model.ReviewStatus
 import com.example.domain.model.StageModuleAvailability
 import com.example.domain.ocr.OcrAvailabilityResult
+import com.example.review.model.SmartReviewPreferencesStore
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
@@ -129,6 +130,7 @@ class MuharrirRepository(
     private val ocrEngineRegistry: OcrEngineRegistry? = null,
     private val geminiKeyVault: GeminiApiKeyVault? = null,
     private val geminiCoordinator: GeminiAnalysisCoordinator? = null,
+    private val smartReviewPrefs: SmartReviewPreferencesStore? = null,
 ) {
     private val documentDao = database.documentDao()
     private val pageDao = database.pageDao()
@@ -432,7 +434,11 @@ class MuharrirRepository(
                                         ocrUpdatedAtMillis = System.currentTimeMillis(),
                                     )
                                     if (geminiAnalysisDao.getAnalysisForPage(page.pageId) != null) {
-                                        comparisonEngine.compareAndPersistForPage(documentId, page.pageId)
+                                        comparisonEngine.compareAndPersistForPage(
+                                            documentId = documentId,
+                                            pageId = page.pageId,
+                                            autoAcceptHighConfidence = smartReviewPrefs?.isAutoAcceptHighConfidenceEnabled() == true,
+                                        )
                                     }
                                     if (!wasPreviouslyDone) doneCount++
                                     if (wasPreviouslyFailed) failedCount = (failedCount - 1).coerceAtLeast(0)
@@ -899,6 +905,8 @@ class MuharrirRepository(
     suspend fun runGeminiAnalysis(
         documentId: String,
         singlePageId: String? = null,
+        startPage: Int = 1,
+        endPage: Int = Int.MAX_VALUE,
         onProgress: suspend (GeminiExecutionProgress) -> Unit = {},
     ): GeminiRunOutcome = withContext(Dispatchers.IO) {
         val coordinator = geminiCoordinator
@@ -915,20 +923,30 @@ class MuharrirRepository(
             return@withContext GeminiRunOutcome.Failure("لا توجد صفحات مكتملة OCR بعد؛ شغّل استخراج النص أولاً.")
         }
 
+        val effectiveStartPage = startPage.coerceAtLeast(1)
+        val effectiveEndPage = endPage.coerceAtLeast(effectiveStartPage)
         val targetPages = if (singlePageId != null) {
             eligiblePages.filter { it.pageId == singlePageId }
         } else {
-            eligiblePages.filter { it.geminiAnalysis == null }
+            eligiblePages.filter {
+                it.geminiAnalysis == null &&
+                    it.originalPageNumber in effectiveStartPage..effectiveEndPage
+            }
         }
 
         val alreadyAnalyzedCount = eligiblePages.count { it.geminiAnalysis != null }
         if (targetPages.isEmpty()) {
+            val isFilteredRange = singlePageId == null && (startPage > 1 || endPage < Int.MAX_VALUE)
             return@withContext GeminiRunOutcome.Completed(
                 analyzedNow = 0,
                 totalAnalyzedPages = alreadyAnalyzedCount,
                 failedPages = 0,
                 totalEligiblePages = eligiblePages.size,
-                lastMessageAr = "جميع الصفحات الجاهزة ($alreadyAnalyzedCount) محللة مسبقاً عبر Gemini.",
+                lastMessageAr = if (isFilteredRange) {
+                    "لا توجد صفحات غير محللة ومكتملة OCR ضمن النطاق ($effectiveStartPage–$effectiveEndPage)."
+                } else {
+                    "جميع الصفحات الجاهزة ($alreadyAnalyzedCount) محللة مسبقاً عبر Gemini."
+                },
             )
         }
 
@@ -962,7 +980,11 @@ class MuharrirRepository(
                             is GeminiPageAnalysisOutcome.Success -> {
                                 geminiAnalysisDao.upsertAnalysis(outcome.record.toEntity())
                                 pageDao.updatePageStatus(page.pageId, PageStatus.ANALYZED.name)
-                                comparisonEngine.compareAndPersistForPage(documentId, page.pageId)
+                                comparisonEngine.compareAndPersistForPage(
+                                    documentId = documentId,
+                                    pageId = page.pageId,
+                                    autoAcceptHighConfidence = smartReviewPrefs?.isAutoAcceptHighConfidenceEnabled() == true,
+                                )
                                 analyzedNow++
                             }
                             is GeminiPageAnalysisOutcome.Failure -> {
@@ -1239,6 +1261,7 @@ class MuharrirRepository(
                 ocrEngineRegistry = OcrEngineRegistry.createDefault(appContext),
                 geminiKeyVault = keyVault,
                 geminiCoordinator = coordinator,
+                smartReviewPrefs = SmartReviewPreferencesStore.getInstance(appContext),
             )
         }
     }

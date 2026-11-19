@@ -56,12 +56,20 @@ data class ReviewUiState(
     val pageJumpError: String? = null,
     val reopenDialog: ReopenConfirmationRequest? = null,
     val showPartialApprovalDialog: Boolean = false,
+    val showBulkApproveDialog: Boolean = false,
+    val autoAcceptHighConfidence: Boolean = false,
     val approvalSucceeded: Boolean = false,
 ) {
     val totalFilteredCount: Int get() = filteredItems.size
     val displayPosition: Int get() = if (filteredItems.isEmpty() || currentItem == null) 0 else currentIndex + 1
     val canGoPrevious: Boolean get() = currentIndex > 0
     val canGoNext: Boolean get() = currentIndex < filteredItems.lastIndex
+    val pendingGeminiApproveCount: Int
+        get() = allItems.count {
+            it.category != DiscrepancyCategory.A &&
+                it.reviewStatus == ReviewStatus.PENDING &&
+                !it.suggestedText.isNullOrBlank()
+        }
 }
 
 /**

@@ -440,6 +440,23 @@ interface ReviewItemDao {
     @Query(
         """
         UPDATE review_items
+        SET review_status = 'APPROVED_GEMINI',
+            user_text = suggested_text,
+            resolved_at = :resolvedAt,
+            stale_note_ar = NULL
+        WHERE id IN (:itemIds)
+          AND suggested_text IS NOT NULL
+          AND trim(suggested_text) != ''
+        """,
+    )
+    suspend fun bulkApproveGeminiByIds(
+        itemIds: List<Long>,
+        resolvedAt: Long,
+    ): Int
+
+    @Query(
+        """
+        UPDATE review_items
         SET review_status = 'PENDING',
             stale_note_ar = NULL
         WHERE id = :itemId

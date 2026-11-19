@@ -99,6 +99,36 @@ class OcrTextCleaner {
         return collapseHorizontalSpaces(result)
     }
 
+    fun isHeaderOrFooterNoise(
+        text: String,
+        pageNumber: Int = 0,
+    ): Boolean {
+        val collapsed = collapseHorizontalSpaces(text)
+        if (collapsed.isEmpty()) return true
+
+        val normalizedDigits = normalizeDigits(collapsed)
+        if (EXACT_PAGE_WORD_WITH_NUMBER_REGEX.matches(collapsed)) return true
+        if (EXACT_STANDALONE_NUMBER_REGEX.matches(collapsed)) return true
+        if (YEAR_RANGE_REGEX.matches(normalizedDigits)) return true
+
+        val trimmedEdgeDigits = normalizedDigits.trim(' ', '-', '–', '—', '[', ']', '(', ')', '/', ':', '.', '،')
+        if (pageNumber > 0 && trimmedEdgeDigits == pageNumber.toString()) return true
+
+        var stripped = collapsed
+        stripped = NOISE_PAGE_MARKER_REGEX.replace(stripped, " ")
+        stripped = YEAR_RANGE_REGEX.replace(stripped, " ")
+        stripped = DATE_PATTERN_REGEX.replace(stripped, " ")
+        stripped = TIME_PATTERN_REGEX.replace(stripped, " ")
+        stripped = WATERMARK_TEXT_REGEX.replace(stripped, " ")
+        stripped = GARBLED_FOOTER_NOISE_REGEX.replace(stripped, " ")
+        stripped = SERIAL_NUMBER_REGEX.replace(stripped, " ")
+
+        if (stripped == collapsed) return false
+
+        val remaining = stripped.replace(NOISE_PUNCTUATION_STRIP_REGEX, "").trim()
+        return remaining.isEmpty()
+    }
+
     private fun stripMetadataIfSafe(
         line: String,
         pageNumber: Int,
@@ -161,11 +191,16 @@ class OcrTextCleaner {
         )
         private val EXACT_STANDALONE_NUMBER_REGEX = Regex("^[-–—\\[\\]()\\s]*[0-9٠-٩]{1,4}[-–—\\[\\]()\\s]*$")
         private val INLINE_PAGE_WORD_WITH_NUMBER_REGEX = Regex("الصفحة\\s*[:\\-/\\.]?\\s*[0-9٠-٩]+")
+        private val NOISE_PAGE_MARKER_REGEX = Regex(
+            "(?:الصفحة|صفحة|ص)\\s*[:\\-/\\.]?\\s*[0-9٠-٩]+(?:\\s*(?:من|/)\\s*[0-9٠-٩]+)?",
+        )
+        private val YEAR_RANGE_REGEX = Regex("\\b[0-9٠-٩]{4}\\s*[-/–—]\\s*[0-9٠-٩]{4}\\b")
         private val DATE_PATTERN_REGEX = Regex("\\b\\d{4}[-/]\\d{1,2}(?:[-/]\\d{1,2})?\\b|\\b\\d{1,2}[-/]\\d{1,2}[-/]\\d{2,4}\\b")
         private val TIME_PATTERN_REGEX = Regex("\\b\\d{1,2}:\\d{2}(?::\\d{2})?(?:\\s*(?:AM|PM|am|pm|ص|م))?\\b")
         private val WATERMARK_TEXT_REGEX = Regex("Espace\\s+Juridique", RegexOption.IGNORE_CASE)
         private val SERIAL_NUMBER_REGEX = Regex("\\b[0-9٠-٩]{6,}\\b")
         private val GARBLED_FOOTER_NOISE_REGEX = Regex("عسوتل\\s*[0-9٠-٩]*")
+        private val NOISE_PUNCTUATION_STRIP_REGEX = Regex("[\\s\\-–—_/|:.,،؛:()\\[\\]«»\"'©•*]+")
 
         private val SENTENCE_END_PUNCTUATION = setOf('.', '؟', '!', ':', '"', ')')
         private val BULLET_CHARS = setOf('-', '•', '✓', '❖')
@@ -177,5 +212,8 @@ class OcrTextCleaner {
 
         fun cleanArabicText(text: String): String =
             defaultInstance.cleanArabicText(text)
+
+        fun isHeaderOrFooterNoise(text: String, pageNumber: Int = 0): Boolean =
+            defaultInstance.isHeaderOrFooterNoise(text, pageNumber)
     }
 }

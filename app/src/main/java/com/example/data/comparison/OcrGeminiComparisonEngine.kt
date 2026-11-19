@@ -6,12 +6,14 @@ import com.example.data.local.OcrResultEntity
 import com.example.data.local.ReviewItemEntity
 import com.example.data.local.toDomain
 import com.example.domain.model.BoundingBox
+import com.example.domain.model.ComparisonCategory
 import com.example.domain.model.GeminiPageAnalysisRecord
 import com.example.domain.model.GeminiSuggestionItem
 import com.example.domain.model.OcrElementLevel
 import com.example.domain.model.OcrResult
 import com.example.domain.model.OcrSegment
 import com.example.domain.model.ReviewStatus
+import com.example.export.domain.OcrTextCleaner
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlin.math.max
@@ -39,6 +41,7 @@ class OcrGeminiComparisonEngine(
     suspend fun compareAndPersistForPage(
         documentId: String,
         pageId: String,
+        autoAcceptHighConfidence: Boolean = false,
     ): ComparisonPageSummary = withContext(Dispatchers.IO) {
         val ocrEntity: OcrResultEntity? = ocrResultDao.getOcrResultForPage(pageId)
         val geminiEntity: GeminiAnalysisEntity? = geminiAnalysisDao.getAnalysisForPage(pageId)
@@ -62,6 +65,7 @@ class OcrGeminiComparisonEngine(
             ocrResult = ocrResult,
             geminiRecord = geminiRecord,
             nowMillis = nowMillis,
+            autoAcceptHighConfidence = autoAcceptHighConfidence,
         )
 
         val existingItems = reviewItemDao.getItemsForPage(pageId)
@@ -162,10 +166,18 @@ class OcrGeminiComparisonEngine(
         ocrResult: OcrResult,
         geminiRecord: GeminiPageAnalysisRecord,
         nowMillis: Long,
+        autoAcceptHighConfidence: Boolean = false,
     ): List<ReviewItemEntity> {
         if (geminiRecord.items.isEmpty()) return emptyList()
 
-        val drafted = geminiRecord.items.mapIndexed { rawIdx, item ->
+        val drafted = geminiRecord.items.mapIndexedNotNull { rawIdx, item ->
+            val ocrIsNoise = OcrTextCleaner.isHeaderOrFooterNoise(item.ocr_text, geminiRecord.pageNumber)
+            val suggestedIsBlankOrNoise = item.suggested_text.isBlank() ||
+                OcrTextCleaner.isHeaderOrFooterNoise(item.suggested_text, geminiRecord.pageNumber)
+            if (ocrIsNoise && suggestedIsBlankOrNoise) {
+                return@mapIndexedNotNull null
+            }
+
             val x1 = item.bbox.getOrElse(0) { 0f }.roundToInt()
             val y1 = item.bbox.getOrElse(1) { 0f }.roundToInt()
             val x2 = item.bbox.getOrElse(2) { 0f }.roundToInt()
@@ -217,6 +229,15 @@ class OcrGeminiComparisonEngine(
         )
 
         return readingOrdered.mapIndexed { readingPos, draft ->
+            val suggested = draft.classification.persistedSuggestedText
+            val isClearCorrection = draft.classification.category == ComparisonCategory.DISAGREEMENT &&
+                !suggested.isNullOrBlank() &&
+                suggested.trim() != draft.classification.persistedOcrText.trim()
+            val shouldAutoAccept = autoAcceptHighConfidence &&
+                isClearCorrection &&
+                draft.geminiConfidence != null &&
+                draft.geminiConfidence > HIGH_CONFIDENCE_AUTO_ACCEPT_THRESHOLD
+
             ReviewItemEntity(
                 id = 0L,
                 documentId = documentId,
@@ -229,17 +250,17 @@ class OcrGeminiComparisonEngine(
                 x2 = draft.x2,
                 y2 = draft.y2,
                 ocrText = draft.classification.persistedOcrText,
-                suggestedText = draft.classification.persistedSuggestedText,
+                suggestedText = suggested,
                 ocrConfidence = draft.ocrConfidence,
                 geminiConfidence = draft.geminiConfidence,
                 category = draft.classification.category.name,
                 priority = draft.classification.priority,
-                reviewStatus = ReviewStatus.PENDING.name,
-                userText = null,
+                reviewStatus = if (shouldAutoAccept) ReviewStatus.APPROVED_GEMINI.name else ReviewStatus.PENDING.name,
+                userText = if (shouldAutoAccept) suggested else null,
                 evidence = draft.evidence,
                 reasonType = draft.reasonType,
                 createdAt = nowMillis,
-                resolvedAt = null,
+                resolvedAt = if (shouldAutoAccept) nowMillis else null,
                 blockIndex = draft.blockIndex,
                 lineIndex = draft.lineIndex,
                 elementIndex = readingPos,
@@ -438,6 +459,10 @@ class OcrGeminiComparisonEngine(
         val evidence: String,
         val reasonType: String,
     )
+
+    companion object {
+        const val HIGH_CONFIDENCE_AUTO_ACCEPT_THRESHOLD = 0.90f
+    }
 }
 
 data class ComparisonPageSummary(

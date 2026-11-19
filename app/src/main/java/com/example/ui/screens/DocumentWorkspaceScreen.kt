@@ -137,7 +137,7 @@ fun DocumentWorkspaceScreen(
     onPauseOcr: () -> Unit,
     onReprocessFailedPages: (android.content.Context, String) -> Unit,
     onRetrySingleOcrPage: (android.content.Context, String, String) -> Unit,
-    onStartGeminiAnalysis: (String, String?) -> Unit,
+    onStartGeminiAnalysis: (String, String?, Int?, Int?) -> Unit,
     onPauseGeminiAnalysis: () -> Unit,
     wordExportViewModel: WordExportViewModel,
     onOpenSettings: () -> Unit,
@@ -366,11 +366,16 @@ fun DocumentWorkspaceScreen(
                     GeminiAnalysisWorkspaceCard(
                         document = document,
                         selectedPageIndex = previewPageIndex,
+                        selectedPageRange = selectedPageRange,
                         geminiState = geminiState,
                         geminiKeys = geminiKeys,
                         usageStats = geminiUsageStats,
-                        onStartAllPending = { onStartGeminiAnalysis(document.id, null) },
-                        onAnalyzeSelectedPage = { pageId -> onStartGeminiAnalysis(document.id, pageId) },
+                        onStartAllPending = { startPage, endPage ->
+                            onStartGeminiAnalysis(document.id, null, startPage, endPage)
+                        },
+                        onAnalyzeSelectedPage = { pageId ->
+                            onStartGeminiAnalysis(document.id, pageId, null, null)
+                        },
                         onPause = onPauseGeminiAnalysis,
                         onOpenSettings = onOpenSettings,
                     )
@@ -1608,18 +1613,19 @@ private fun FinalWordExportCard(
 private fun GeminiAnalysisWorkspaceCard(
     document: DocumentRecord,
     selectedPageIndex: Int,
+    selectedPageRange: IntRange? = null,
     geminiState: GeminiExecutionUiState,
     geminiKeys: List<GeminiKeyRecord>,
     usageStats: GeminiUsageStats,
-    onStartAllPending: () -> Unit,
+    onStartAllPending: (Int, Int) -> Unit,
     onAnalyzeSelectedPage: (String) -> Unit,
     onPause: () -> Unit,
     onOpenSettings: () -> Unit,
 ) {
     val pages = document.pages
+    val totalCount = pages.size
     val ocrDonePages = pages.filter { it.ocrResult != null }
     val analyzedCount = ocrDonePages.count { it.geminiAnalysis != null }
-    val pendingGeminiCount = ocrDonePages.count { it.geminiAnalysis == null }
     val hasUsableKey = geminiKeys.any {
         it.isEnabled &&
             it.status != GeminiKeyStatus.INVALID &&
@@ -1629,6 +1635,36 @@ private fun GeminiAnalysisWorkspaceCard(
     val isThisDocRunning = geminiState.isRunning && geminiState.activeDocumentId == document.id
     val selectedPage = pages.getOrNull(selectedPageIndex)
     val selectedAnalysis = selectedPage?.geminiAnalysis
+
+    var startPageText by remember(document.id, totalCount, selectedPageRange) {
+        val defaultStart = (selectedPageRange?.first ?: 1).coerceIn(1, totalCount.coerceAtLeast(1))
+        mutableStateOf(defaultStart.toString())
+    }
+    var endPageText by remember(document.id, totalCount, selectedPageRange) {
+        val defaultEnd = (selectedPageRange?.last ?: totalCount).coerceIn(1, totalCount.coerceAtLeast(1))
+        mutableStateOf(defaultEnd.toString())
+    }
+
+    val parsedStart = startPageText.trim().toIntOrNull()
+    val parsedEnd = endPageText.trim().toIntOrNull()
+    val rangeErrorAr = when {
+        totalCount == 0 -> null
+        parsedStart == null || parsedEnd == null -> "يرجى إدخال رقمي صفحة بداية ونهاية صحيحين."
+        parsedStart < 1 -> "يجب أن تبدأ صفحة البداية من 1 على الأقل."
+        parsedEnd > totalCount -> "يجب ألا تتجاوز صفحة النهاية إجمالي الصفحات ($totalCount)."
+        parsedStart > parsedEnd -> "يجب أن تكون «من صفحة» أصغر من أو تساوي «إلى صفحة»."
+        else -> null
+    }
+    val validRange = if (rangeErrorAr == null && parsedStart != null && parsedEnd != null) {
+        parsedStart..parsedEnd
+    } else {
+        null
+    }
+    val pendingGeminiInRangeCount = if (validRange != null) {
+        ocrDonePages.count { it.geminiAnalysis == null && it.originalPageNumber in validRange }
+    } else {
+        0
+    }
 
     Card(
         modifier = Modifier
@@ -1718,13 +1754,60 @@ private fun GeminiAnalysisWorkspaceCard(
                         Text("إيقاف تحليل Gemini مؤقتاً")
                     }
                 } else {
+                    if (totalCount > 0) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        ) {
+                            OutlinedTextField(
+                                value = startPageText,
+                                onValueChange = { startPageText = it.filter { ch -> ch.isDigit() } },
+                                label = { Text("من صفحة") },
+                                singleLine = true,
+                                enabled = !geminiState.isRunning,
+                                isError = rangeErrorAr != null,
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("workspace_gemini_start_page_input"),
+                            )
+                            OutlinedTextField(
+                                value = endPageText,
+                                onValueChange = { endPageText = it.filter { ch -> ch.isDigit() } },
+                                label = { Text("إلى صفحة") },
+                                singleLine = true,
+                                enabled = !geminiState.isRunning,
+                                isError = rangeErrorAr != null,
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("workspace_gemini_end_page_input"),
+                            )
+                        }
+                        if (rangeErrorAr != null) {
+                            Text(
+                                text = rangeErrorAr,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.error,
+                                modifier = Modifier.testTag("workspace_gemini_page_range_error"),
+                            )
+                        }
+                    }
+
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
                         Button(
-                            onClick = onStartAllPending,
-                            enabled = !geminiState.isRunning && ocrDonePages.isNotEmpty() && pendingGeminiCount > 0,
+                            onClick = {
+                                if (validRange != null) {
+                                    onStartAllPending(validRange.first, validRange.last)
+                                }
+                            },
+                            enabled = !geminiState.isRunning &&
+                                ocrDonePages.isNotEmpty() &&
+                                validRange != null &&
+                                pendingGeminiInRangeCount > 0,
                             modifier = Modifier
                                 .weight(1f)
                                 .heightIn(min = 48.dp)
@@ -1735,8 +1818,8 @@ private fun GeminiAnalysisWorkspaceCard(
                             Text(
                                 when {
                                     ocrDonePages.isEmpty() -> "أتمّ OCR أولاً"
-                                    pendingGeminiCount == 0 -> "اكتمل التحليل"
-                                    else -> "تحليل ($pendingGeminiCount) صفحة"
+                                    validRange != null && pendingGeminiInRangeCount == 0 -> "اكتمل النطاق المحدد"
+                                    else -> "تحليل ($pendingGeminiInRangeCount) صفحة"
                                 },
                             )
                         }

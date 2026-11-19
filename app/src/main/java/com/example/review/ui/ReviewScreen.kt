@@ -37,6 +37,7 @@ import androidx.compose.material.icons.filled.Assessment
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DeleteOutline
+import androidx.compose.material.icons.filled.DoneAll
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.ExpandLess
@@ -62,6 +63,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -105,10 +107,10 @@ fun ReviewScreen(
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
 
     BackHandler {
-        if (uiState.reopenDialog != null) {
-            viewModel.dismissReopenDialog()
-        } else {
-            onNavigateBack()
+        when {
+            uiState.showBulkApproveDialog -> viewModel.dismissBulkApproveDialog()
+            uiState.reopenDialog != null -> viewModel.dismissReopenDialog()
+            else -> onNavigateBack()
         }
     }
 
@@ -187,12 +189,25 @@ fun ReviewScreen(
                 )
             },
         ) { innerPadding ->
-            Box(
+            Column(
                 modifier = Modifier
                     .fillMaxSize()
-                    .padding(innerPadding)
-                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                    .padding(innerPadding),
             ) {
+                ReviewSmartActionsBar(
+                    pendingGeminiApproveCount = uiState.pendingGeminiApproveCount,
+                    isSaving = uiState.isSaving,
+                    autoAcceptHighConfidence = uiState.autoAcceptHighConfidence,
+                    onBulkApproveClick = viewModel::requestBulkApproveGemini,
+                    onToggleAutoAcceptHighConfidence = viewModel::toggleAutoAcceptHighConfidence,
+                )
+
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                ) {
                 when {
                     uiState.isLoading -> {
                         Box(
@@ -275,6 +290,39 @@ fun ReviewScreen(
                     }
                 }
             }
+            }
+        }
+
+        if (uiState.showBulkApproveDialog) {
+            AlertDialog(
+                onDismissRequest = viewModel::dismissBulkApproveDialog,
+                title = { Text("قبول كل اقتراحات Gemini") },
+                text = {
+                    Text(
+                        "سيتم قبول جميع اقتراحات Gemini المتبقية (${uiState.pendingGeminiApproveCount} موضع). هل أنت متأكد؟",
+                    )
+                },
+                confirmButton = {
+                    Button(
+                        onClick = viewModel::confirmBulkApproveGemini,
+                        modifier = Modifier
+                            .minimumInteractiveComponentSize()
+                            .testTag("confirm_bulk_approve_button"),
+                    ) {
+                        Text("نعم، قبول الكل")
+                    }
+                },
+                dismissButton = {
+                    TextButton(
+                        onClick = viewModel::dismissBulkApproveDialog,
+                        modifier = Modifier
+                            .minimumInteractiveComponentSize()
+                            .testTag("cancel_bulk_approve_button"),
+                    ) {
+                        Text("إلغاء")
+                    }
+                },
+            )
         }
 
         uiState.reopenDialog?.let { request ->
@@ -851,6 +899,13 @@ private fun ReviewBottomNavigationBar(
                             .heightIn(min = 48.dp)
                             .testTag("toggle_include_agreement_chip"),
                     )
+                }
+                if (uiState.selectedFilter in setOf(
+                        ReviewFilter.ALL,
+                        ReviewFilter.DISCREPANCY_ONLY,
+                        ReviewFilter.PENDING_ONLY,
+                    )
+                ) {
                     FilterChip(
                         selected = uiState.ignoreMinorDifferences,
                         onClick = onToggleIgnoreMinorDifferences,
@@ -1033,6 +1088,73 @@ private fun EmptyReviewQueueView(
                         Text("ملخص المراجعة")
                     }
                 }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun ReviewSmartActionsBar(
+    pendingGeminiApproveCount: Int,
+    isSaving: Boolean,
+    autoAcceptHighConfidence: Boolean,
+    onBulkApproveClick: () -> Unit,
+    onToggleAutoAcceptHighConfidence: (Boolean) -> Unit,
+) {
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("review_smart_actions_bar"),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+    ) {
+        FlowRow(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 6.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            FilledTonalButton(
+                onClick = onBulkApproveClick,
+                enabled = !isSaving && pendingGeminiApproveCount > 0,
+                modifier = Modifier
+                    .minimumInteractiveComponentSize()
+                    .testTag("bulk_approve_gemini_button"),
+            ) {
+                Icon(
+                    imageVector = Icons.Default.DoneAll,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp),
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = if (pendingGeminiApproveCount > 0) {
+                        "قبول كل اقتراحات Gemini ($pendingGeminiApproveCount)"
+                    } else {
+                        "قبول كل اقتراحات Gemini"
+                    },
+                    style = MaterialTheme.typography.labelMedium,
+                )
+            }
+
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.heightIn(min = 48.dp),
+            ) {
+                Text(
+                    text = "القبول التلقائي لاقتراحات Gemini عالية الثقة",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+                Switch(
+                    checked = autoAcceptHighConfidence,
+                    onCheckedChange = onToggleAutoAcceptHighConfidence,
+                    enabled = !isSaving,
+                    modifier = Modifier.testTag("review_auto_accept_high_confidence_switch"),
+                )
             }
         }
     }

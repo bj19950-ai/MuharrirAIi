@@ -193,6 +193,48 @@ class MuharrirReviewQueueGateway(
             )
         }
     }
+
+    override suspend fun approveAllPendingGemini(
+        documentId: String,
+        itemIds: List<Long>,
+        resolvedAt: Long,
+    ): Unit = withContext(Dispatchers.IO) {
+        if (itemIds.isEmpty()) return@withContext
+
+        itemIds.chunked(500).forEach { chunk ->
+            reviewItemDao.bulkApproveGeminiByIds(
+                itemIds = chunk,
+                resolvedAt = resolvedAt,
+            )
+        }
+
+        val itemsByPage = reviewItemDao.getReviewItemsInReadingOrder(documentId)
+            .filter { ComparisonCategory.fromPersisted(it.category) != ComparisonCategory.AGREEMENT }
+            .groupBy { it.pageId }
+
+        itemsByPage.forEach { (pageId, pageItems) ->
+            val pageHasRemaining = pageItems.any {
+                it.reviewStatus == ReviewStatus.PENDING.name || it.reviewStatus == ReviewStatus.STALE.name
+            }
+            pageDao.updatePageStatus(
+                pageId = pageId,
+                pageStatus = if (pageHasRemaining) PageStatus.NEEDS_REVIEW.name else PageStatus.REVIEWED.name,
+            )
+        }
+
+        val doc = documentDao.getDocumentById(documentId)
+        if (doc != null && doc.reviewApprovedAt == null &&
+            doc.processingStatus != DocumentStatus.COMPLETED.name
+        ) {
+            documentDao.updateProcessingProgress(
+                documentId = doc.id,
+                processingStatus = DocumentStatus.NEEDS_REVIEW.name,
+                processingProgressPercent = doc.processingProgressPercent,
+                lastModifiedMillis = System.currentTimeMillis(),
+                errorMessageAr = doc.errorMessageAr,
+            )
+        }
+    }
 }
 
 class MuharrirDocumentReviewGateway(

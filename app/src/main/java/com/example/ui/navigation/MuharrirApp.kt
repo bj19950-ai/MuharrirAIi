@@ -36,6 +36,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -158,6 +159,7 @@ fun MuharrirApp(
     val documentPageRanges by viewModel.documentPageRanges.collectAsStateWithLifecycle()
     val pagesNeedingReprocessingCount by viewModel.pagesNeedingReprocessingCount.collectAsStateWithLifecycle()
     val appearancePreferences by viewModel.appearancePreferences.collectAsStateWithLifecycle()
+    val autoAcceptHighConfidenceGemini by viewModel.autoAcceptHighConfidenceGemini.collectAsStateWithLifecycle()
     var showLaunchSplash by rememberSaveable { mutableStateOf(true) }
 
     val navigateToRoute: (String) -> Unit = { route ->
@@ -197,10 +199,16 @@ fun MuharrirApp(
                         reviewQueueGateway = viewModel.reviewQueueGateway,
                         documentReviewGateway = viewModel.documentReviewGateway,
                         pageBitmapSource = viewModel.pageBitmapSource,
+                        initialAutoAcceptHighConfidence = autoAcceptHighConfidenceGemini,
+                        onAutoAcceptHighConfidenceChanged = viewModel::setAutoAcceptHighConfidenceGemini,
                     ) as T
                 }
             },
         )
+    }
+
+    LaunchedEffect(activeReviewViewModel, autoAcceptHighConfidenceGemini) {
+        activeReviewViewModel?.syncAutoAcceptHighConfidence(autoAcceptHighConfidenceGemini)
     }
 
     val isImmersiveReviewRoute = activeReviewViewModel != null && (
@@ -478,6 +486,8 @@ fun MuharrirApp(
                             onToggleHighlightUnresolved = viewModel::setHighlightUnresolved,
                             onToggleAutoSave = viewModel::setAutoSaveCheckpoints,
                             onToggleResumeAfterInterruption = viewModel::setResumeAfterInterruption,
+                            autoAcceptHighConfidenceGemini = autoAcceptHighConfidenceGemini,
+                            onToggleAutoAcceptHighConfidenceGemini = viewModel::setAutoAcceptHighConfidenceGemini,
                         )
                     }
                 }

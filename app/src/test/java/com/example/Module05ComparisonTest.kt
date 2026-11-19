@@ -818,4 +818,256 @@ class Module05ComparisonTest {
 
         db.close()
     }
+
+    @Test
+    fun `comparison engine silently drops header footer date year-range and watermark noise before creating review items`() = runTest {
+        val db = openTestDatabase()
+        seedDocumentAndPages(db, docId = "doc-noise-filter", pageCount = 1)
+        val pageId = "doc-noise-filter_page_1"
+
+        val ocrSegments = listOf(
+            OcrSegment("w1", "Espace Juridique", BoundingBox(20f, 10f, 200f, 35f), 0.75f, OcrElementLevel.ELEMENT, blockIndex = 0, lineIndex = 0, elementIndex = 0),
+            OcrSegment("w2", "2025-2024", BoundingBox(220f, 10f, 320f, 35f), 0.80f, OcrElementLevel.ELEMENT, blockIndex = 0, lineIndex = 0, elementIndex = 1),
+            OcrSegment("w3", "الصفحة 1", BoundingBox(340f, 10f, 430f, 35f), 0.82f, OcrElementLevel.ELEMENT, blockIndex = 0, lineIndex = 0, elementIndex = 2),
+            OcrSegment("w4", "المدينه", BoundingBox(100f, 150f, 250f, 195f), 0.88f, OcrElementLevel.ELEMENT, blockIndex = 1, lineIndex = 0, elementIndex = 0),
+        )
+        db.ocrResultDao().upsertOcrResult(
+            OcrResultEntity(
+                pageId = pageId,
+                documentId = "doc-noise-filter",
+                pageNumber = 1,
+                engineType = OcrEngineType.TESSERACT.name,
+                recognizedText = "Espace Juridique 2025-2024 الصفحة 1 المدينه",
+                segmentsJson = OcrSegmentsJsonCodec.toJson(ocrSegments),
+                confidence = 0.82f,
+                imageWidthPx = 600,
+                imageHeightPx = 900,
+                recognizedAtMillis = 1000L,
+            ),
+        )
+        val geminiItems = listOf(
+            GeminiSuggestionItem("Espace Juridique", "Espace Juridique", listOf(20f, 10f, 200f, 35f), 0.90f, "علامة مائية", "visual", true),
+            GeminiSuggestionItem("2025-2024", "", listOf(220f, 10f, 320f, 35f), 0.91f, "سنة دراسية في الترويسة", "structure", true),
+            GeminiSuggestionItem("الصفحة 1", "صفحة ١", listOf(340f, 10f, 430f, 35f), 0.93f, "رقم الصفحة", "structure", true),
+            GeminiSuggestionItem("2025-4", "2025-4", listOf(10f, 860f, 90f, 890f), 0.50f, "تاريخ تذييل", "visual", true),
+            GeminiSuggestionItem("1:53", "", listOf(100f, 860f, 160f, 890f), 0.70f, "وقت طباعة", "visual", false),
+            GeminiSuggestionItem("المدينه", "المدينة", listOf(100f, 150f, 250f, 195f), 0.96f, "نقطتا التاء المربوطة واضحتان", "visual", true),
+        )
+        db.geminiAnalysisDao().upsertAnalysis(
+            GeminiAnalysisEntity(
+                pageId = pageId,
+                documentId = "doc-noise-filter",
+                pageNumber = 1,
+                modelId = "gemini-flash-latest",
+                usedKeyLabel = "K1",
+                rawValidatedJson = responseAdapter.toJson(GeminiPageAnalysisResponse(pageId, 1, geminiItems)),
+                itemsCount = geminiItems.size,
+                analyzedAtMillis = 1100L,
+            ),
+        )
+
+        val engine = OcrGeminiComparisonEngine(db)
+        val summary = engine.compareAndPersistForPage("doc-noise-filter", pageId)
+        assertEquals(1, summary.totalComputed)
+
+        val persisted = db.reviewItemDao().getItemsForPage(pageId)
+        assertEquals(1, persisted.size)
+        assertEquals("المدينه", persisted.single().ocrText)
+        assertEquals("المدينة", persisted.single().suggestedText)
+
+        db.close()
+    }
+
+    @Test
+    fun `comparison engine auto-accepts only high-confidence clear corrections when smart auto-accept is enabled`() = runTest {
+        val db = openTestDatabase()
+        seedDocumentAndPages(db, docId = "doc-smart-auto", pageCount = 1)
+        val pageId = "doc-smart-auto_page_1"
+
+        val ocrSegments = listOf(
+            OcrSegment("s1", "المحكمه", BoundingBox(50f, 60f, 200f, 100f), 0.85f, OcrElementLevel.ELEMENT, blockIndex = 0, lineIndex = 0, elementIndex = 0),
+            OcrSegment("s2", "الشركه", BoundingBox(50f, 130f, 200f, 170f), 0.80f, OcrElementLevel.ELEMENT, blockIndex = 0, lineIndex = 1, elementIndex = 0),
+            OcrSegment("s3", "كلمة مطموسة", BoundingBox(50f, 200f, 220f, 240f), 0.40f, OcrElementLevel.ELEMENT, blockIndex = 0, lineIndex = 2, elementIndex = 0),
+        )
+        db.ocrResultDao().upsertOcrResult(
+            OcrResultEntity(
+                pageId = pageId,
+                documentId = "doc-smart-auto",
+                pageNumber = 1,
+                engineType = OcrEngineType.TESSERACT.name,
+                recognizedText = "المحكمه الشركه كلمة مطموسة",
+                segmentsJson = OcrSegmentsJsonCodec.toJson(ocrSegments),
+                confidence = 0.72f,
+                imageWidthPx = 600,
+                imageHeightPx = 900,
+                recognizedAtMillis = 1000L,
+            ),
+        )
+        val geminiItems = listOf(
+            GeminiSuggestionItem("المحكمه", "المحكمة", listOf(50f, 60f, 200f, 100f), 0.95f, "واضحة جداً", "visual", false),
+            GeminiSuggestionItem("الشركه", "الشركة", listOf(50f, 130f, 200f, 170f), 0.85f, "ثقة دون العتبة", "visual", true),
+            GeminiSuggestionItem("كلمة مطموسة", "", listOf(50f, 200f, 220f, 240f), 0.92f, "طمس", "visual", true),
+        )
+        db.geminiAnalysisDao().upsertAnalysis(
+            GeminiAnalysisEntity(
+                pageId = pageId,
+                documentId = "doc-smart-auto",
+                pageNumber = 1,
+                modelId = "gemini-flash-latest",
+                usedKeyLabel = "K1",
+                rawValidatedJson = responseAdapter.toJson(GeminiPageAnalysisResponse(pageId, 1, geminiItems)),
+                itemsCount = geminiItems.size,
+                analyzedAtMillis = 1100L,
+            ),
+        )
+
+        val engine = OcrGeminiComparisonEngine(db)
+        engine.compareAndPersistForPage(
+            documentId = "doc-smart-auto",
+            pageId = pageId,
+            autoAcceptHighConfidence = true,
+        )
+
+        val persisted = db.reviewItemDao().getItemsForPage(pageId)
+        assertEquals(3, persisted.size)
+
+        val autoApproved = persisted.first { it.ocrText == "المحكمه" }
+        assertEquals(ReviewStatus.APPROVED_GEMINI.name, autoApproved.reviewStatus)
+        assertEquals("المحكمة", autoApproved.userText)
+        assertNotNull(autoApproved.resolvedAt)
+
+        val moderateConfidencePending = persisted.first { it.ocrText == "الشركه" }
+        assertEquals(ReviewStatus.PENDING.name, moderateConfidencePending.reviewStatus)
+        assertNull(moderateConfidencePending.userText)
+
+        val unresolvedPending = persisted.first { it.ocrText == "كلمة مطموسة" }
+        assertEquals(ReviewStatus.PENDING.name, unresolvedPending.reviewStatus)
+        assertNull(unresolvedPending.userText)
+
+        db.close()
+    }
+
+    @Test
+    fun `runGeminiAnalysis respects startPage and endPage range and skips outside pages`() = runTest {
+        val db = openTestDatabase()
+        val docId = "doc-gemini-range"
+        val pdfFile = storage.getPrivatePdfFile(docId).apply {
+            parentFile?.mkdirs()
+            writeBytes("%PDF-1.4\n%content".toByteArray())
+        }
+        db.documentDao().upsertDocument(
+            DocumentEntity(
+                id = docId,
+                originalFileName = "نطاق_جيميناي.pdf",
+                internalStoragePath = pdfFile.absolutePath,
+                fileSizeBytes = pdfFile.length(),
+                importDateMillis = 1000L,
+                lastModifiedMillis = 1000L,
+                pageCount = 3,
+                indexedPagesCount = 3,
+                processingStatus = DocumentStatus.PROCESSING.name,
+                importStatus = ImportStatus.READY_FOR_PROCESSING.name,
+                importProgressPercent = 100,
+                processingProgressPercent = 50,
+                isValidationPassed = true,
+                validationNote = "ok",
+                errorMessageAr = null,
+            ),
+        )
+        val pages = (1..3).map { p ->
+            PageEntity(
+                pageId = "${docId}_page_$p",
+                documentId = docId,
+                originalPageNumber = p,
+                widthPoints = 595,
+                heightPoints = 842,
+                renderingReference = pdfFile.absolutePath,
+                thumbnailCachePath = null,
+                pageStatus = PageStatus.OCR_DONE.name,
+                ocrStatus = OcrPageStatus.DONE.name,
+                ocrEngineUsed = OcrEngineType.TESSERACT.name,
+            )
+        }
+        db.pageDao().insertPages(pages)
+        (1..3).forEach { p ->
+            db.ocrResultDao().upsertOcrResult(
+                OcrResultEntity(
+                    pageId = "${docId}_page_$p",
+                    documentId = docId,
+                    pageNumber = p,
+                    engineType = OcrEngineType.TESSERACT.name,
+                    recognizedText = "نص الصفحة $p",
+                    segmentsJson = "[]",
+                    confidence = 0.90f,
+                    imageWidthPx = 800,
+                    imageHeightPx = 1100,
+                    recognizedAtMillis = 1000L,
+                ),
+            )
+        }
+
+        val vault = EncryptedGeminiApiKeyVault(
+            prefsProvider = { context.getSharedPreferences(testVaultPrefsName, Context.MODE_PRIVATE) },
+            dayProvider = { "2026-11-19" },
+        )
+        vault.addKey("Key1", "AIzaSyRangeTestKey123456789")
+
+        val analyzedPageNumbers = mutableListOf<Int>()
+        val fakeClient = object : GeminiPageClient {
+            override suspend fun validateKey(apiKey: String, modelId: String) = Result.success(Unit)
+            override suspend fun analyzePage(
+                apiKey: String,
+                modelId: String,
+                pageBitmap: Bitmap,
+                payload: GeminiPagePromptPayload,
+            ): Result<String> {
+                analyzedPageNumbers.add(payload.pageNumber)
+                return Result.success(
+                    responseAdapter.toJson(
+                        GeminiPageAnalysisResponse(payload.pageId, payload.pageNumber, emptyList()),
+                    ),
+                )
+            }
+        }
+        val fakeEngine = object : PdfPageEngine {
+            override suspend fun indexPages(
+                pdfFile: File,
+                batchSize: Int,
+                onBatchIndexed: suspend (Int, Int, List<IndexedPdfPageMeta>) -> Unit,
+            ) = PrivatePdfIndexResult.Success(
+                3,
+                listOf(
+                    IndexedPdfPageMeta(1, 595, 842),
+                    IndexedPdfPageMeta(2, 595, 842),
+                    IndexedPdfPageMeta(3, 595, 842),
+                ),
+            )
+
+            override suspend fun renderFromFile(pdfFile: File, pageIndex: Int, maxWidthPx: Int): Bitmap =
+                Bitmap.createBitmap(400, 600, Bitmap.Config.ARGB_8888)
+        }
+
+        val repo = MuharrirRepository(
+            database = db,
+            storage = storage,
+            pageEngine = fakeEngine,
+            geminiKeyVault = vault,
+            geminiCoordinator = GeminiAnalysisCoordinator(vault, fakeClient) { },
+        )
+
+        val outcome = repo.runGeminiAnalysis(
+            documentId = docId,
+            startPage = 2,
+            endPage = 2,
+        )
+        assertTrue(outcome is GeminiRunOutcome.Completed)
+        assertEquals(listOf(2), analyzedPageNumbers)
+
+        val updatedDoc = repo.getDocumentById(docId)!!
+        assertNull(updatedDoc.pages[0].geminiAnalysis)
+        assertNotNull(updatedDoc.pages[1].geminiAnalysis)
+        assertNull(updatedDoc.pages[2].geminiAnalysis)
+
+        db.close()
+    }
 }

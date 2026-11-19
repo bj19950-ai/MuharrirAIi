@@ -71,6 +71,11 @@ interface ReviewQueueGateway {
         resolvedAt: Long,
     )
     suspend fun reopenItemAsPending(itemId: Long)
+    suspend fun approveAllPendingGemini(
+        documentId: String,
+        itemIds: List<Long>,
+        resolvedAt: Long,
+    ) {}
 }
 
 /**
