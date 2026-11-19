@@ -22,6 +22,7 @@ import com.example.domain.model.GeminiKeyRecord
 import com.example.domain.model.GeminiUsageStats
 import com.example.domain.model.ImportStatus
 import com.example.domain.model.OcrEngineType
+import com.example.domain.model.PageRecord
 import com.example.domain.model.PipelineStageInfo
 import com.example.domain.model.ProcessingPreferences
 import com.example.domain.ocr.OcrAvailabilityResult
@@ -39,6 +40,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
@@ -123,6 +125,15 @@ data class GeminiExecutionUiState(
     val totalTargetPages: Int = 0,
 )
 
+data class SuspiciousFixUiState(
+    val isRunning: Boolean = false,
+    val activeDocumentId: String? = null,
+    val currentPageNumber: Int = 0,
+    val fixedPages: Int = 0,
+    val failedPages: Int = 0,
+    val totalSuspiciousPages: Int = 0,
+)
+
 @OptIn(ExperimentalCoroutinesApi::class)
 class MuharrirViewModel(
     application: Application,
@@ -171,6 +182,11 @@ class MuharrirViewModel(
     private val _geminiExecutionState = MutableStateFlow(GeminiExecutionUiState())
     val geminiExecutionState: StateFlow<GeminiExecutionUiState> = _geminiExecutionState.asStateFlow()
 
+    private val _suspiciousFixState = MutableStateFlow(SuspiciousFixUiState())
+    val suspiciousFixState: StateFlow<SuspiciousFixUiState> = _suspiciousFixState.asStateFlow()
+
+    private val suspiciousRefreshTrigger = MutableStateFlow(0)
+
     private val _documentPageRanges = MutableStateFlow<Map<String, IntRange>>(emptyMap())
     val documentPageRanges: StateFlow<Map<String, IntRange>> = _documentPageRanges.asStateFlow()
 
@@ -180,6 +196,7 @@ class MuharrirViewModel(
     private var activeImportJob: Job? = null
     private var activeOcrJob: Job? = null
     private var activeGeminiJob: Job? = null
+    private var activeSuspiciousFixJob: Job? = null
 
     val preferences: StateFlow<ProcessingPreferences> = repository.preferences
         .stateIn(
@@ -290,6 +307,27 @@ class MuharrirViewModel(
             started = SharingStarted.WhileSubscribed(5_000),
             initialValue = 0,
         )
+
+    val suspiciousPages: StateFlow<List<PageRecord>> = combine(
+        activeDocument,
+        _ocrExecutionState,
+        suspiciousRefreshTrigger,
+    ) { doc, ocrState, _ ->
+        val isOcrRunningOnDoc = doc != null && ocrState.isRunning && ocrState.activeDocumentId == doc.id
+        doc to isOcrRunningOnDoc
+    }.flatMapLatest { (doc, isOcrRunningOnDoc) ->
+        if (doc == null || isOcrRunningOnDoc) {
+            flowOf(emptyList())
+        } else {
+            flow {
+                emit(repository.detectSuspiciousPages(doc))
+            }
+        }
+    }.stateIn(
+        scope = viewModelScope,
+        started = SharingStarted.WhileSubscribed(5_000),
+        initialValue = emptyList(),
+    )
 
     init {
         viewModelScope.launch {
@@ -864,6 +902,43 @@ class MuharrirViewModel(
         activeGeminiJob = null
         _geminiExecutionState.update { it.copy(isRunning = false) }
         _workspaceNoticeAr.value = "تم إيقاف تحليل Gemini مؤقتاً. النتائج المكتملة محفوظة محلياً."
+    }
+
+    fun fixSuspiciousPagesWithGemini(documentId: String) {
+        if (_suspiciousFixState.value.isRunning || _geminiExecutionState.value.isRunning || _ocrExecutionState.value.isRunning) {
+            return
+        }
+        activeSuspiciousFixJob?.cancel()
+        activeSuspiciousFixJob = viewModelScope.launch {
+            _suspiciousFixState.value = SuspiciousFixUiState(
+                isRunning = true,
+                activeDocumentId = documentId,
+            )
+            when (
+                val outcome = repository.fixSuspiciousPagesWithGemini(
+                    documentId = documentId,
+                    onProgress = { progress ->
+                        _suspiciousFixState.value = SuspiciousFixUiState(
+                            isRunning = true,
+                            activeDocumentId = progress.documentId,
+                            currentPageNumber = progress.currentPageNumber,
+                            fixedPages = progress.analyzedPages,
+                            failedPages = progress.failedPages,
+                            totalSuspiciousPages = progress.totalTargetPages,
+                        )
+                    },
+                )
+            ) {
+                is GeminiRunOutcome.Completed -> {
+                    _workspaceNoticeAr.value = outcome.lastMessageAr
+                }
+                is GeminiRunOutcome.Failure -> {
+                    _workspaceNoticeAr.value = outcome.reasonAr
+                }
+            }
+            _suspiciousFixState.update { it.copy(isRunning = false) }
+            suspiciousRefreshTrigger.update { it + 1 }
+        }
     }
 
     fun registerApiKeySlot(label: String, keyPreviewIgnored: String) {

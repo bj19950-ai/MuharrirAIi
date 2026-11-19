@@ -14,11 +14,13 @@ import com.example.data.gemini.GoogleAiGeminiClient
 import com.example.data.local.ApiKeySlotEntity
 import com.example.data.local.DocumentEntity
 import com.example.data.local.MuharrirDatabase
+import com.example.data.local.OcrResultEntity
 import com.example.data.local.PageEntity
 import com.example.data.local.toDomain
 import com.example.data.local.toEntity
 import com.example.data.ocr.OcrEngineRegistry
 import com.example.data.ocr.OcrImagePreprocessor
+import com.example.data.ocr.PageInspectionCacheStore
 import com.example.data.ocr.TesseractDataInstaller
 import com.example.data.ocr.TrainedDataInstallResult
 import com.example.data.pdf.AndroidPdfRendererEngine
@@ -47,6 +49,7 @@ import com.example.domain.model.ReviewItem
 import com.example.domain.model.ReviewStatus
 import com.example.domain.model.StageModuleAvailability
 import com.example.domain.ocr.OcrAvailabilityResult
+import com.example.domain.usecase.DetectSuspiciousPagesUseCase
 import com.example.review.model.SmartReviewPreferencesStore
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -60,6 +63,7 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.withContext
 import java.io.IOException
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 
 sealed interface ImportOutcome {
     data class Success(val document: DocumentRecord) : ImportOutcome
@@ -131,6 +135,7 @@ class MuharrirRepository(
     private val geminiKeyVault: GeminiApiKeyVault? = null,
     private val geminiCoordinator: GeminiAnalysisCoordinator? = null,
     private val smartReviewPrefs: SmartReviewPreferencesStore? = null,
+    private val pageInspectionCacheStore: PageInspectionCacheStore? = null,
 ) {
     private val documentDao = database.documentDao()
     private val pageDao = database.pageDao()
@@ -140,6 +145,9 @@ class MuharrirRepository(
     private val preferencesDao = database.preferencesDao()
     private val apiKeySlotDao = database.apiKeySlotDao()
     private val comparisonEngine = OcrGeminiComparisonEngine(database)
+    private val detectSuspiciousPagesUseCase = DetectSuspiciousPagesUseCase()
+    private val visualEmptyMemoryCache = ConcurrentHashMap<String, Boolean>()
+    private val geminiRepairedMemoryCache = ConcurrentHashMap<String, Boolean>()
 
     val reviewQueueGateway: com.example.review.model.ReviewQueueGateway =
         MuharrirReviewQueueGateway(database)
@@ -263,6 +271,170 @@ class MuharrirRepository(
 
     fun observeCountPagesNeedingReprocessing(documentId: String): Flow<Int> =
         pageDao.observeCountPagesNeedingReprocessing(documentId)
+
+    suspend fun detectSuspiciousPages(document: DocumentRecord): List<PageRecord> =
+        withContext(Dispatchers.IO) {
+            val excludedRepairedIds = document.pages
+                .filter { isPageGeminiRepaired(it.pageId) }
+                .mapTo(mutableSetOf()) { it.pageId }
+            detectSuspiciousPagesUseCase.detect(
+                pages = document.pages,
+                excludedPageIds = excludedRepairedIds,
+                isVisuallyEmpty = { page -> isPageVisuallyEmpty(document, page) },
+            )
+        }
+
+    /**
+     * Loops ONLY through detected suspicious pages (abnormally short OCR text compared to document average),
+     * sends their page images to Gemini for full text extraction (ignoring the 150-char limit),
+     * overwrites the OCR text in Room, and refreshes any existing comparison items.
+     */
+    suspend fun fixSuspiciousPagesWithGemini(
+        documentId: String,
+        onProgress: suspend (GeminiExecutionProgress) -> Unit = {},
+    ): GeminiRunOutcome = withContext(Dispatchers.IO) {
+        val coordinator = geminiCoordinator
+            ?: return@withContext GeminiRunOutcome.Failure("منسق Gemini غير متوفر في هذا التكوين.")
+
+        val doc = getDocumentById(documentId)
+            ?: return@withContext GeminiRunOutcome.Failure("المستند المطلوب غير موجود.")
+
+        val privateFile = storage.resolvePrivatePdfIfExists(doc.internalStorageRef)
+            ?: return@withContext GeminiRunOutcome.Failure("تعذر الوصول إلى ملف PDF في التخزين الخاص.")
+
+        val suspiciousPages = detectSuspiciousPages(doc)
+        if (suspiciousPages.isEmpty()) {
+            return@withContext GeminiRunOutcome.Completed(
+                analyzedNow = 0,
+                totalAnalyzedPages = 0,
+                failedPages = 0,
+                totalEligiblePages = 0,
+                lastMessageAr = "لا توجد صفحات ناقصة النص تحتاج إلى إصلاح عبر Gemini.",
+            )
+        }
+
+        val hasEnabledKey = geminiKeyVault?.listKeys()?.any { it.isEnabled } ?: true
+        if (!hasEnabledKey) {
+            return@withContext GeminiRunOutcome.Failure(
+                "لا يوجد مفتاح Gemini API مفعّل حالياً. أضف أو فعّل مفتاحاً من الإعدادات.",
+            )
+        }
+
+        var fixedNow = 0
+        var failedCount = 0
+        var lastErrorMsg: String? = null
+
+        for ((idx, page) in suspiciousPages.withIndex()) {
+            currentCoroutineContext().ensureActive()
+            var rawBitmap: Bitmap? = null
+            try {
+                rawBitmap = pageEngine.renderFromFile(
+                    pdfFile = privateFile,
+                    pageIndex = (page.originalPageNumber - 1).coerceAtLeast(0),
+                    maxWidthPx = 1600,
+                )
+                if (rawBitmap == null) {
+                    failedCount++
+                    lastErrorMsg = "تعذر تصيير صورة الصفحة ${page.originalPageNumber} لإرسالها إلى Gemini."
+                } else if (isVisuallyEmptyBitmap(rawBitmap)) {
+                    cachePageVisuallyEmpty(page.pageId, true)
+                } else {
+                    cachePageVisuallyEmpty(page.pageId, false)
+                    val extractionResult = coordinator.extractTextFallbackWithFailover(
+                        pageNumber = page.originalPageNumber,
+                        rawPageBitmap = rawBitmap,
+                    )
+                    extractionResult.fold(
+                        onSuccess = { extractedText ->
+                            val cleaned = extractedText.trim()
+                            val now = System.currentTimeMillis()
+                            val existingOcr = ocrResultDao.getOcrResultForPage(page.pageId)
+                            val updatedEntity = if (existingOcr != null) {
+                                existingOcr.copy(
+                                    recognizedText = cleaned,
+                                    recognizedAtMillis = now,
+                                )
+                            } else {
+                                OcrResultEntity(
+                                    pageId = page.pageId,
+                                    documentId = documentId,
+                                    pageNumber = page.originalPageNumber,
+                                    engineType = (page.ocrEngineUsed ?: OcrEngineType.TESSERACT).name,
+                                    recognizedText = cleaned,
+                                    segmentsJson = "[]",
+                                    confidence = null,
+                                    imageWidthPx = rawBitmap.width,
+                                    imageHeightPx = rawBitmap.height,
+                                    recognizedAtMillis = now,
+                                )
+                            }
+                            ocrResultDao.upsertOcrResult(updatedEntity)
+                            pageDao.updatePageOcrState(
+                                pageId = page.pageId,
+                                pageStatus = if (page.geminiAnalysis != null) PageStatus.ANALYZED.name else PageStatus.OCR_DONE.name,
+                                ocrStatus = OcrPageStatus.DONE.name,
+                                ocrEngineUsed = page.ocrEngineUsed?.name ?: updatedEntity.engineType,
+                                ocrErrorMessageAr = null,
+                                ocrUpdatedAtMillis = now,
+                            )
+                            markPageGeminiRepaired(page.pageId, true)
+                            if (geminiAnalysisDao.getAnalysisForPage(page.pageId) != null) {
+                                comparisonEngine.compareAndPersistForPage(
+                                    documentId = documentId,
+                                    pageId = page.pageId,
+                                    autoAcceptHighConfidence = smartReviewPrefs?.isAutoAcceptHighConfidenceEnabled() == true,
+                                )
+                            }
+                            fixedNow++
+                        },
+                        onFailure = { throwable ->
+                            if (throwable is CancellationException) throw throwable
+                            failedCount++
+                            lastErrorMsg = throwable.localizedMessage?.takeIf { it.isNotBlank() }
+                                ?: "تعذّر استخراج نص الصفحة ${page.originalPageNumber} عبر Gemini."
+                        },
+                    )
+                }
+            } finally {
+                if (rawBitmap != null && !rawBitmap.isRecycled) {
+                    rawBitmap.recycle()
+                }
+            }
+
+            onProgress(
+                GeminiExecutionProgress(
+                    documentId = documentId,
+                    currentPageNumber = page.originalPageNumber,
+                    analyzedPages = fixedNow,
+                    failedPages = failedCount,
+                    totalTargetPages = suspiciousPages.size,
+                ),
+            )
+
+            val hasUsableKey = geminiKeyVault?.getNextEnabledKey() != null
+            if (!hasUsableKey && idx < suspiciousPages.lastIndex && failedCount > 0) {
+                lastErrorMsg = lastErrorMsg ?: "توقفت المعالجة لعدم توفر مفتاح Gemini مفعّل."
+                break
+            }
+        }
+
+        val summaryAr = when {
+            fixedNow > 0 && failedCount == 0 ->
+                "تم إصلاح $fixedNow صفحة ناقصة تلقائياً عبر Gemini وتحديث نصوصها في قاعدة البيانات."
+            fixedNow > 0 && failedCount > 0 ->
+                "تم إصلاح $fixedNow صفحة، وتعذّر إصلاح $failedCount صفحة: ${lastErrorMsg.orEmpty()}"
+            else ->
+                lastErrorMsg ?: "تعذّر إصلاح الصفحات الناقصة عبر Gemini."
+        }
+
+        return@withContext GeminiRunOutcome.Completed(
+            analyzedNow = fixedNow,
+            totalAnalyzedPages = fixedNow,
+            failedPages = failedCount,
+            totalEligiblePages = suspiciousPages.size,
+            lastMessageAr = summaryAr,
+        )
+    }
 
     suspend fun reprocessFailedPages(
         context: Context,
@@ -405,10 +577,15 @@ class MuharrirRepository(
                             )
                             result.fold(
                                 onSuccess = { ocrResult ->
+                                    val isBlank = isVisuallyEmptyBitmap(rawBitmap)
+                                    cachePageVisuallyEmpty(page.pageId, isBlank)
+                                    markPageGeminiRepaired(page.pageId, false)
+
                                     val trimmedOcr = ocrResult.recognizedText.trim()
                                     val needsFallback = trimmedOcr.isEmpty() ||
-                                        (trimmedOcr.length < MIN_OCR_FALLBACK_CHAR_THRESHOLD && !isVisuallyEmptyBitmap(rawBitmap))
+                                        (trimmedOcr.length < MIN_OCR_FALLBACK_CHAR_THRESHOLD && !isBlank)
 
+                                    var usedGeminiFallback = false
                                     val finalOcrResult = if (needsFallback && geminiCoordinator != null) {
                                         val fallbackText = geminiCoordinator.extractTextFallbackWithFailover(
                                             pageNumber = page.originalPageNumber,
@@ -416,6 +593,7 @@ class MuharrirRepository(
                                         ).getOrNull()?.trim()
 
                                         if (!fallbackText.isNullOrEmpty() && fallbackText.length > trimmedOcr.length) {
+                                            usedGeminiFallback = true
                                             ocrResult.copy(recognizedText = fallbackText)
                                         } else {
                                             ocrResult
@@ -424,6 +602,9 @@ class MuharrirRepository(
                                         ocrResult
                                     }
 
+                                    if (usedGeminiFallback) {
+                                        markPageGeminiRepaired(page.pageId, true)
+                                    }
                                     ocrResultDao.upsertOcrResult(finalOcrResult.toEntity())
                                     pageDao.updatePageOcrState(
                                         pageId = page.pageId,
@@ -1212,6 +1393,61 @@ class MuharrirRepository(
         )
     }
 
+    private suspend fun isPageVisuallyEmpty(
+        document: DocumentRecord,
+        page: PageRecord,
+    ): Boolean {
+        visualEmptyMemoryCache[page.pageId]?.let { return it }
+        pageInspectionCacheStore?.isVisuallyEmptyCached(page.pageId)?.let { cached ->
+            visualEmptyMemoryCache[page.pageId] = cached
+            return cached
+        }
+
+        val privateFile = storage.resolvePrivatePdfIfExists(document.internalStorageRef)
+            ?: return false
+
+        var bitmap: Bitmap? = null
+        return try {
+            bitmap = pageEngine.renderFromFile(
+                pdfFile = privateFile,
+                pageIndex = (page.originalPageNumber - 1).coerceAtLeast(0),
+                maxWidthPx = 400,
+            )
+            if (bitmap == null) {
+                false
+            } else {
+                val blank = isVisuallyEmptyBitmap(bitmap)
+                cachePageVisuallyEmpty(page.pageId, blank)
+                blank
+            }
+        } catch (_: Exception) {
+            false
+        } finally {
+            if (bitmap != null && !bitmap.isRecycled) {
+                bitmap.recycle()
+            }
+        }
+    }
+
+    private fun cachePageVisuallyEmpty(pageId: String, isEmpty: Boolean) {
+        visualEmptyMemoryCache[pageId] = isEmpty
+        pageInspectionCacheStore?.setVisuallyEmpty(pageId, isEmpty)
+    }
+
+    private fun isPageGeminiRepaired(pageId: String): Boolean {
+        geminiRepairedMemoryCache[pageId]?.let { return it }
+        val persisted = pageInspectionCacheStore?.isGeminiFallbackApplied(pageId) ?: false
+        if (persisted) {
+            geminiRepairedMemoryCache[pageId] = true
+        }
+        return persisted
+    }
+
+    private fun markPageGeminiRepaired(pageId: String, repaired: Boolean) {
+        geminiRepairedMemoryCache[pageId] = repaired
+        pageInspectionCacheStore?.setGeminiFallbackApplied(pageId, repaired)
+    }
+
     private fun isVisuallyEmptyBitmap(bitmap: Bitmap): Boolean {
         val width = bitmap.width
         val height = bitmap.height
@@ -1262,6 +1498,7 @@ class MuharrirRepository(
                 geminiKeyVault = keyVault,
                 geminiCoordinator = coordinator,
                 smartReviewPrefs = SmartReviewPreferencesStore.getInstance(appContext),
+                pageInspectionCacheStore = PageInspectionCacheStore.getInstance(appContext),
             )
         }
     }

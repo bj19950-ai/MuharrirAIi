@@ -111,6 +111,7 @@ import com.example.ui.theme.AmiriFontFamily
 import com.example.ui.theme.MuharrirTheme
 import com.example.ui.viewmodel.GeminiExecutionUiState
 import com.example.ui.viewmodel.OcrExecutionUiState
+import com.example.ui.viewmodel.SuspiciousFixUiState
 
 @Composable
 fun DocumentWorkspaceScreen(
@@ -121,6 +122,8 @@ fun DocumentWorkspaceScreen(
     ocrState: OcrExecutionUiState,
     selectedPageRange: IntRange? = null,
     pagesNeedingReprocessingCount: Int = 0,
+    suspiciousPages: List<PageRecord> = emptyList(),
+    suspiciousFixState: SuspiciousFixUiState = SuspiciousFixUiState(),
     geminiState: GeminiExecutionUiState,
     geminiKeys: List<GeminiKeyRecord>,
     geminiUsageStats: GeminiUsageStats,
@@ -138,6 +141,7 @@ fun DocumentWorkspaceScreen(
     onReprocessFailedPages: (android.content.Context, String) -> Unit,
     onRetrySingleOcrPage: (android.content.Context, String, String) -> Unit,
     onStartGeminiAnalysis: (String, String?, Int?, Int?) -> Unit,
+    onFixSuspiciousPagesWithGemini: (String) -> Unit = {},
     onPauseGeminiAnalysis: () -> Unit,
     wordExportViewModel: WordExportViewModel,
     onOpenSettings: () -> Unit,
@@ -298,6 +302,18 @@ fun DocumentWorkspaceScreen(
                             }
                         }
                     }
+                }
+            }
+
+            if (document.importStatus == ImportStatus.READY_FOR_PROCESSING && suspiciousPages.isNotEmpty()) {
+                item {
+                    SuspiciousPagesWarningCard(
+                        document = document,
+                        suspiciousPages = suspiciousPages,
+                        suspiciousFixState = suspiciousFixState,
+                        isAnyProcessingRunning = ocrState.isRunning || geminiState.isRunning || suspiciousFixState.isRunning,
+                        onFixAutomatically = { onFixSuspiciousPagesWithGemini(document.id) },
+                    )
                 }
             }
 
@@ -1891,4 +1907,111 @@ private fun GeminiAnalysisWorkspaceCard(
         }
     }
 }
+
+@Composable
+private fun SuspiciousPagesWarningCard(
+    document: DocumentRecord,
+    suspiciousPages: List<PageRecord>,
+    suspiciousFixState: SuspiciousFixUiState,
+    isAnyProcessingRunning: Boolean,
+    onFixAutomatically: () -> Unit,
+) {
+    val ext = MuharrirTheme.extendedColors
+    val pageNumbersText = remember(suspiciousPages) {
+        suspiciousPages.joinToString("، ") { it.originalPageNumber.toString() }
+    }
+    val isFixingThisDoc = suspiciousFixState.isRunning && suspiciousFixState.activeDocumentId == document.id
+
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("suspicious_pages_warning_card"),
+        colors = CardDefaults.cardColors(containerColor = ext.warningContainer),
+        border = BorderStroke(1.5.dp, ext.warning),
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.Top,
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.WarningAmber,
+                    contentDescription = "تحذير صفحات ناقصة",
+                    tint = ext.warning,
+                    modifier = Modifier.padding(top = 2.dp),
+                )
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    Text(
+                        text = "تحذير: تم اكتشاف ${suspiciousPages.size} صفحة يُحتمل أنها ناقصة (نصها قصير جداً): الصفحات [$pageNumbersText]",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = ext.onWarningContainer,
+                        modifier = Modifier.testTag("suspicious_pages_warning_text"),
+                    )
+                    Text(
+                        text = "يعتمد هذا الفحص على مقارنة طول النص المستخرج بمتوسط طول صفحات المستند (أقل من 20% من المتوسط) مع استبعاد الصفحات الفارغة بصرياً تلقائياً.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = ext.onWarningContainer.copy(alpha = 0.85f),
+                    )
+                }
+            }
+
+            if (isFixingThisDoc) {
+                val progress = if (suspiciousFixState.totalSuspiciousPages > 0) {
+                    (suspiciousFixState.fixedPages + suspiciousFixState.failedPages).toFloat() /
+                        suspiciousFixState.totalSuspiciousPages.toFloat()
+                } else {
+                    0f
+                }
+                LinearProgressIndicator(
+                    progress = { progress.coerceIn(0f, 1f) },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(8.dp)
+                        .clip(MaterialTheme.shapes.extraSmall),
+                )
+                Text(
+                    text = "جارٍ إصلاح الصفحة ${suspiciousFixState.currentPageNumber} عبر Gemini — منجز: ${suspiciousFixState.fixedPages} من ${suspiciousPages.size}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = ext.onWarningContainer,
+                )
+            }
+
+            Button(
+                onClick = onFixAutomatically,
+                enabled = !isAnyProcessingRunning,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = ext.warning,
+                    contentColor = ext.onWarning,
+                ),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 48.dp)
+                    .testTag("fix_suspicious_pages_gemini_button"),
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.AutoAwesome,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp),
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = if (isFixingThisDoc) {
+                        "جارٍ إصلاح الصفحات عبر Gemini..."
+                    } else {
+                        "إصلاح هذه الصفحات تلقائياً عبر Gemini"
+                    },
+                )
+            }
+        }
+    }
+}
+
 

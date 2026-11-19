@@ -158,6 +158,8 @@ fun MuharrirApp(
     val geminiExecutionState by viewModel.geminiExecutionState.collectAsStateWithLifecycle()
     val documentPageRanges by viewModel.documentPageRanges.collectAsStateWithLifecycle()
     val pagesNeedingReprocessingCount by viewModel.pagesNeedingReprocessingCount.collectAsStateWithLifecycle()
+    val suspiciousPages by viewModel.suspiciousPages.collectAsStateWithLifecycle()
+    val suspiciousFixState by viewModel.suspiciousFixState.collectAsStateWithLifecycle()
     val appearancePreferences by viewModel.appearancePreferences.collectAsStateWithLifecycle()
     val autoAcceptHighConfidenceGemini by viewModel.autoAcceptHighConfidenceGemini.collectAsStateWithLifecycle()
     var showLaunchSplash by rememberSaveable { mutableStateOf(true) }
@@ -384,6 +386,8 @@ fun MuharrirApp(
                             ocrState = ocrExecutionState,
                             selectedPageRange = activeDocument?.let { documentPageRanges[it.id] },
                             pagesNeedingReprocessingCount = pagesNeedingReprocessingCount,
+                            suspiciousPages = suspiciousPages,
+                            suspiciousFixState = suspiciousFixState,
                             geminiState = geminiExecutionState,
                             geminiKeys = geminiKeys,
                             geminiUsageStats = geminiUsageStats,
@@ -401,6 +405,7 @@ fun MuharrirApp(
                             onReprocessFailedPages = viewModel::reprocessFailedPages,
                             onRetrySingleOcrPage = viewModel::retrySingleOcrPage,
                             onStartGeminiAnalysis = viewModel::startGeminiAnalysis,
+                            onFixSuspiciousPagesWithGemini = viewModel::fixSuspiciousPagesWithGemini,
                             onPauseGeminiAnalysis = viewModel::pauseGeminiAnalysis,
                             wordExportViewModel = wordExportViewModel,
                             onOpenSettings = { navigateToRoute(MuharrirRoutes.ROUTE_SETTINGS) },
