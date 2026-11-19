@@ -234,69 +234,64 @@ object WordTextAssembler {
         item: ReviewItemModel,
         highlightUnresolved: Boolean,
     ): WordTextSegment? {
-        return when {
-            item.reviewStatus == ReviewStatus.IGNORED -> null
+        if (item.reviewStatus == ReviewStatus.IGNORED) {
+            return null
+        }
 
+        return when {
             item.isStale ||
                 item.reviewStatus == ReviewStatus.UNRESOLVED ||
                 item.reviewStatus == ReviewStatus.PENDING ||
                 item.reviewStatus == ReviewStatus.STALE -> {
-                val unresolvedText = OcrTextCleaner.cleanArabicText(
-                    item.ocrText.ifBlank { item.suggestedText.orEmpty() },
+                val rawFallback = item.userText?.takeIf { it.isNotBlank() }
+                    ?: item.ocrText.ifBlank { item.suggestedText.orEmpty() }
+                val unresolvedText = OcrTextCleaner.cleanArabicText(rawFallback)
+                    .ifBlank { rawFallback.trim() }
+                WordTextSegment(
+                    text = unresolvedText,
+                    isUnresolvedHighlight = highlightUnresolved,
                 )
-                if (unresolvedText.isEmpty()) {
-                    null
-                } else {
-                    WordTextSegment(
-                        text = unresolvedText,
-                        isUnresolvedHighlight = highlightUnresolved,
-                    )
-                }
             }
 
             item.reviewStatus == ReviewStatus.APPROVED_GEMINI ||
                 item.reviewStatus == ReviewStatus.MANUALLY_EDITED -> {
-                val approvedText = item.userText?.takeIf { it.isNotBlank() }
+                val rawApproved = item.userText?.takeIf { it.isNotBlank() }
                     ?: item.suggestedText?.takeIf { it.isNotBlank() }
                     ?: item.ocrText
-                val cleaned = OcrTextCleaner.cleanArabicText(approvedText)
-                if (cleaned.isEmpty()) {
-                    null
-                } else {
-                    WordTextSegment(
-                        text = cleaned,
-                        isUnresolvedHighlight = false,
-                    )
-                }
+                val cleaned = OcrTextCleaner.cleanArabicText(rawApproved)
+                    .ifBlank { rawApproved.trim() }
+                WordTextSegment(
+                    text = cleaned,
+                    isUnresolvedHighlight = false,
+                )
             }
 
             item.category == DiscrepancyCategory.A -> {
-                val finalText = OcrTextCleaner.cleanArabicText(
-                    item.userText?.takeIf { it.isNotBlank() } ?: item.ocrText,
+                val rawAgreement = item.userText?.takeIf { it.isNotBlank() }
+                    ?: item.ocrText.ifBlank { item.suggestedText.orEmpty() }
+                val finalText = OcrTextCleaner.cleanArabicText(rawAgreement)
+                    .ifBlank { rawAgreement.trim() }
+                WordTextSegment(
+                    text = finalText,
+                    isUnresolvedHighlight = false,
                 )
-                if (finalText.isEmpty()) {
-                    null
-                } else {
-                    WordTextSegment(
-                        text = finalText,
-                        isUnresolvedHighlight = false,
-                    )
-                }
             }
 
             else -> {
-                val fallback = OcrTextCleaner.cleanArabicText(item.ocrText)
-                if (fallback.isEmpty()) {
-                    null
-                } else {
-                    WordTextSegment(text = fallback, isUnresolvedHighlight = false)
-                }
+                val rawOther = item.userText?.takeIf { it.isNotBlank() }
+                    ?: item.ocrText.ifBlank { item.suggestedText.orEmpty() }
+                val fallback = OcrTextCleaner.cleanArabicText(rawOther)
+                    .ifBlank { rawOther.trim() }
+                WordTextSegment(
+                    text = fallback,
+                    isUnresolvedHighlight = false,
+                )
             }
         }
     }
 
     private const val TEXT_LOSS_WARNING_RATIO = 0.80
-    private const val MIN_FULL_PAGE_OCR_LENGTH = 40
+    private const val MIN_FULL_PAGE_OCR_LENGTH = 20
     private val WHITESPACE_REGEX = Regex("\\s+")
     const val TEXT_LOSS_WARNING_MESSAGE =
         "تحذير: تم حذف جزء كبير من النص في هذه الصفحة أثناء التنظيف، يرجى مراجعتها"

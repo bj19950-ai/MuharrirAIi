@@ -470,4 +470,103 @@ class Module07WordExportTest {
 
         db.close()
     }
+
+    @Test
+    fun `word export includes all non-ignored review items even when they do not match raw OCR text`() {
+        val generator = WordGenerator()
+        val doc = ExportDocumentModel("doc-m11-leftover", "اكتمال_العناصر.pdf", reviewApprovedAt = 1700000000000L)
+        val pages = listOf(
+            DocumentPageModel(
+                id = "p1",
+                documentId = "doc-m11-leftover",
+                pageNumber = 1,
+                ocrText = "هذا النص الأصلي في الصفحة يظل محفوظاً بالكامل دون أي حذف.",
+            ),
+        )
+        val items = listOf(
+            ReviewItemModel(
+                id = 1L,
+                documentId = "doc-m11-leftover",
+                pageNumber = 1,
+                category = DiscrepancyCategory.B,
+                ocrText = "جملة غير موجودة حرفياً",
+                suggestedText = "عبارة معدلة من المراجع",
+                ocrConfidence = 0.7f,
+                geminiConfidence = 0.9f,
+                evidence = "إضافة",
+                bbox = null,
+                reviewStatus = ReviewStatus.MANUALLY_EDITED,
+                userText = "عبارة مضافة من المستخدم",
+                resolvedAt = 100L,
+                orderIndex = 0,
+            ),
+            ReviewItemModel(
+                id = 2L,
+                documentId = "doc-m11-leftover",
+                pageNumber = 1,
+                category = DiscrepancyCategory.D,
+                ocrText = "كلمة متبقية غير مطابقة",
+                suggestedText = null,
+                ocrConfidence = 0.3f,
+                geminiConfidence = 0.4f,
+                evidence = "طمس",
+                bbox = null,
+                reviewStatus = ReviewStatus.UNRESOLVED,
+                userText = null,
+                resolvedAt = null,
+                orderIndex = 1,
+            ),
+            ReviewItemModel(
+                id = 3L,
+                documentId = "doc-m11-leftover",
+                pageNumber = 1,
+                category = DiscrepancyCategory.B,
+                ocrText = "عنصر مستبعد تماماً",
+                suggestedText = "عنصر مستبعد تماماً",
+                ocrConfidence = 0.8f,
+                geminiConfidence = 0.8f,
+                evidence = "مستبعد",
+                bbox = null,
+                reviewStatus = ReviewStatus.IGNORED,
+                userText = null,
+                resolvedAt = 150L,
+                orderIndex = 2,
+            ),
+        )
+
+        val outFile = File(context.filesDir, "m11_all_items.docx")
+        generator.generate(doc, pages, items, WordExportMode.ACADEMIC, outFile, highlightUnresolved = true)
+
+        ZipFile(outFile).use { zip ->
+            val xmlString = zip.getInputStream(zip.getEntry("word/document.xml")).readBytes().toString(Charsets.UTF_8)
+            assertTrue(xmlString.contains("هذا النص الأصلي في الصفحة يظل محفوظاً بالكامل دون أي حذف."))
+            assertTrue(xmlString.contains("عبارة مضافة من المستخدم"))
+            assertTrue(xmlString.contains("كلمة متبقية غير مطابقة"))
+            assertFalse(xmlString.contains("عنصر مستبعد تماماً"))
+        }
+    }
+
+    @Test
+    fun `word generator inserts red completeness warning when page output is below 20 percent of other pages average`() {
+        val generator = WordGenerator()
+        val doc = ExportDocumentModel("doc-m11-complete", "فحص_الاكتمال.pdf", reviewApprovedAt = 1700000000000L)
+        val denseText = "تنص المادة الأولى من القانون المدني على وجوب تنفيذ الالتزامات التعاقدية بحسن نية بين جميع الأطراف المتعاقدة وفق القواعد القانونية المرعية."
+        val pages = listOf(
+            DocumentPageModel("p1", "doc-m11-complete", pageNumber = 1, ocrText = "سطر قصير."),
+            DocumentPageModel("p2", "doc-m11-complete", pageNumber = 2, ocrText = denseText),
+            DocumentPageModel("p3", "doc-m11-complete", pageNumber = 3, ocrText = denseText),
+        )
+
+        val outFile = File(context.filesDir, "m11_completeness.docx")
+        generator.generate(doc, pages, emptyList(), WordExportMode.ACADEMIC, outFile, highlightUnresolved = true)
+
+        ZipFile(outFile).use { zip ->
+            val xmlString = zip.getInputStream(zip.getEntry("word/document.xml")).readBytes().toString(Charsets.UTF_8)
+            assertTrue(xmlString.contains(WordGenerator.INCOMPLETE_PAGE_WARNING_MESSAGE))
+            assertTrue(xmlString.contains(WordGenerator.UNRESOLVED_TEXT_RED_HEX))
+            // Page 1 flagged once; Pages 2 & 3 should not repeat the warning
+            val count = Regex(Regex.escape(WordGenerator.INCOMPLETE_PAGE_WARNING_MESSAGE)).findAll(xmlString).count()
+            assertEquals(1, count)
+        }
+    }
 }

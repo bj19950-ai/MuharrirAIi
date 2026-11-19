@@ -351,6 +351,184 @@ class GeminiAnalysisCoordinator(
         }
     }
 
+    /**
+     * Fallback OCR extraction when local Tesseract yields empty or suspiciously short text.
+     * Reuses GeminiImagePreparer and multi-key failover without enforcing JSON schema.
+     */
+    suspend fun extractTextFallbackWithFailover(
+        pageNumber: Int,
+        rawPageBitmap: Bitmap,
+        prompt: String = GeminiPromptBuilder.FALLBACK_OCR_PROMPT,
+    ): Result<String> {
+        val initialKeys = keyVault.listKeys()
+        if (initialKeys.none { it.isEnabled }) {
+            return Result.failure(
+                IllegalStateException("لا يوجد مفتاح Gemini API مفعّل لتنفيذ الاستخراج الاحتياطي."),
+            )
+        }
+
+        val prepared = GeminiImagePreparer.prepareForGemini(rawPageBitmap)
+        try {
+            if (prepared.byteSize >= GeminiModelConfig.MAX_IMAGE_BYTES) {
+                return Result.failure(
+                    IllegalStateException("حجم صورة الصفحة $pageNumber يتجاوز الحد المسموح للاستخراج الاحتياطي."),
+                )
+            }
+
+            val modelId = keyVault.getSelectedModelId()
+            val permanentlySkippedForPage = mutableSetOf<String>()
+            val rateLimitedThisRound = mutableSetOf<String>()
+            val rateLimitAttemptsPerKey = mutableMapOf<String, Int>()
+            val serverRetryUsedPerKey = mutableSetOf<String>()
+            var backoffRound = 0
+            val maxAttemptsPerKeyOnRateLimit = 1 + GeminiModelConfig.MAX_RATE_LIMIT_RETRIES_PER_KEY_PER_PAGE
+
+            while (true) {
+                val candidateKey = keyVault.getNextEnabledKey(
+                    excludingIds = permanentlySkippedForPage + rateLimitedThisRound,
+                )
+                val selectedKey = if (candidateKey != null) {
+                    candidateKey
+                } else {
+                    val retryableKeys = keyVault.listKeys().filter { k ->
+                        k.isEnabled &&
+                            k.id !in permanentlySkippedForPage &&
+                            k.status != GeminiKeyStatus.INVALID &&
+                            k.status != GeminiKeyStatus.PERMISSION_DENIED &&
+                            k.status != GeminiKeyStatus.QUOTA_EXHAUSTED &&
+                            (rateLimitAttemptsPerKey[k.id] ?: 0) < maxAttemptsPerKeyOnRateLimit
+                    }
+                    if (retryableKeys.isEmpty()) {
+                        return Result.failure(
+                            IllegalStateException("استُنفدت جميع مفاتيح Gemini المتاحة للاستخراج الاحتياطي للصفحة $pageNumber."),
+                        )
+                    }
+                    val backoffMs = 1000L * (1L shl backoffRound.coerceAtMost(3))
+                    backoffRound++
+                    rateLimitedThisRound.clear()
+                    backoffDelayMillis(backoffMs)
+                    retryableKeys.first()
+                }
+
+                val rawSecret = keyVault.getRawKeySecret(selectedKey.id)
+                if (rawSecret.isNullOrBlank()) {
+                    keyVault.updateKeyStatus(
+                        id = selectedKey.id,
+                        status = GeminiKeyStatus.INVALID,
+                        lastErrorAr = "تعذر العثور على قيمة المفتاح المشفرة.",
+                        disableKey = true,
+                    )
+                    permanentlySkippedForPage.add(selectedKey.id)
+                    continue
+                }
+
+                SensitiveKeyMasker.logSafe(
+                    tag = TAG,
+                    message = "Fallback Gemini OCR ($modelId) page=$pageNumber using '${selectedKey.label}' (${selectedKey.maskedPrefix})",
+                    knownSecrets = listOf(rawSecret),
+                )
+
+                val callResult = client.extractPlainText(
+                    apiKey = rawSecret,
+                    modelId = modelId,
+                    pageBitmap = prepared.bitmap,
+                    prompt = prompt,
+                )
+
+                var finalResult: Result<String>? = null
+                callResult.fold(
+                    onSuccess = { extractedText ->
+                        keyVault.touchKeyUsed(selectedKey.id)
+                        keyVault.updateKeyStatus(
+                            id = selectedKey.id,
+                            status = GeminiKeyStatus.VALID,
+                            lastErrorAr = null,
+                            disableKey = false,
+                        )
+                        val cleaned = extractedText.trim()
+                        val statusMsg = "اكتمل الاستخراج الاحتياطي للصفحة $pageNumber عبر Gemini (${cleaned.length} حرفاً)."
+                        keyVault.recordRequestOutcome(
+                            keyId = selectedKey.id,
+                            keyLabel = selectedKey.label,
+                            statusAr = statusMsg,
+                            succeeded = true,
+                            incrementDailyCounter = true,
+                        )
+                        finalResult = if (cleaned.isNotEmpty()) {
+                            Result.success(cleaned)
+                        } else {
+                            Result.failure(IllegalStateException("أرجع Gemini نصاً فارغاً أثناء الاستخراج الاحتياطي."))
+                        }
+                    },
+                    onFailure = { throwable ->
+                        val classified = GeminiErrorClassifier.classify(throwable, listOf(rawSecret))
+                        SensitiveKeyMasker.logSafe(
+                            tag = TAG,
+                            message = "Fallback Gemini OCR failed on '${selectedKey.label}': ${classified.diagnosticSafeSummary}",
+                            knownSecrets = listOf(rawSecret),
+                            isWarning = true,
+                        )
+                        keyVault.recordRequestOutcome(
+                            keyId = selectedKey.id,
+                            keyLabel = selectedKey.label,
+                            statusAr = classified.arabicMessage,
+                            succeeded = false,
+                            incrementDailyCounter = classified.kind != GeminiErrorKind.NETWORK_ERROR,
+                        )
+
+                        when (classified.kind) {
+                            GeminiErrorKind.INVALID_KEY,
+                            GeminiErrorKind.PERMISSION_DENIED,
+                            GeminiErrorKind.QUOTA_EXHAUSTED -> {
+                                keyVault.updateKeyStatus(
+                                    id = selectedKey.id,
+                                    status = classified.keyStatusUpdate ?: GeminiKeyStatus.INVALID,
+                                    lastErrorAr = classified.arabicMessage,
+                                    disableKey = true,
+                                )
+                                permanentlySkippedForPage.add(selectedKey.id)
+                            }
+                            GeminiErrorKind.RATE_LIMITED -> {
+                                keyVault.updateKeyStatus(
+                                    id = selectedKey.id,
+                                    status = GeminiKeyStatus.RATE_LIMITED,
+                                    lastErrorAr = classified.arabicMessage,
+                                    disableKey = false,
+                                )
+                                val nextCount = (rateLimitAttemptsPerKey[selectedKey.id] ?: 0) + 1
+                                rateLimitAttemptsPerKey[selectedKey.id] = nextCount
+                                rateLimitedThisRound.add(selectedKey.id)
+                                if (nextCount >= maxAttemptsPerKeyOnRateLimit) {
+                                    permanentlySkippedForPage.add(selectedKey.id)
+                                }
+                            }
+                            GeminiErrorKind.SERVER_ERROR -> {
+                                if (selectedKey.id !in serverRetryUsedPerKey) {
+                                    serverRetryUsedPerKey.add(selectedKey.id)
+                                } else {
+                                    permanentlySkippedForPage.add(selectedKey.id)
+                                }
+                            }
+                            GeminiErrorKind.NETWORK_ERROR -> {
+                                finalResult = Result.failure(IllegalStateException(classified.arabicMessage))
+                            }
+                            GeminiErrorKind.MALFORMED_OUTPUT,
+                            GeminiErrorKind.UNKNOWN_FAILURE -> {
+                                permanentlySkippedForPage.add(selectedKey.id)
+                            }
+                        }
+                    },
+                )
+
+                if (finalResult != null) {
+                    return finalResult!!
+                }
+            }
+        } finally {
+            prepared.recycleSafely()
+        }
+    }
+
     companion object {
         private const val TAG = "MuharrirGeminiCoord"
     }

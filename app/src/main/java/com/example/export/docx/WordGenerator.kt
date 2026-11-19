@@ -85,7 +85,11 @@ class WordGenerator(
     }
 
     private fun writeMatchOriginalMode(xwpfDocument: XWPFDocument, plan: WordDocumentPlan) {
+        val incompletePageNumbers = findIncompletePages(plan.pages)
         plan.pages.forEachIndexed { pageIdx, page ->
+            if (page.pageNumber in incompletePageNumbers) {
+                writeWarningParagraph(xwpfDocument, INCOMPLETE_PAGE_WARNING_MESSAGE)
+            }
             page.textLossWarning?.let { warning ->
                 writeWarningParagraph(xwpfDocument, warning)
             }
@@ -134,6 +138,7 @@ class WordGenerator(
             isUnresolvedHighlight = false,
         )
 
+        val incompletePageNumbers = findIncompletePages(plan.pages)
         plan.pages.forEach { page ->
             val headingParagraph = createRtlParagraph(xwpfDocument).apply {
                 spacingBefore = 200
@@ -147,6 +152,10 @@ class WordGenerator(
                 isUnresolvedHighlight = false,
             )
 
+            if (page.pageNumber in incompletePageNumbers) {
+                writeWarningParagraph(xwpfDocument, INCOMPLETE_PAGE_WARNING_MESSAGE)
+            }
+
             page.textLossWarning?.let { warning ->
                 writeWarningParagraph(xwpfDocument, warning)
             }
@@ -155,6 +164,22 @@ class WordGenerator(
                 writeAcademicSegmentParagraph(xwpfDocument, runs)
             }
         }
+    }
+
+    internal fun findIncompletePages(pages: List<com.example.export.model.WordPageSection>): Set<Int> {
+        if (pages.size <= 1) return emptySet()
+        val charCounts = pages.map { page ->
+            page.paragraphs.sumOf { runs -> runs.sumOf { it.text.length } }
+        }
+        return pages.indices.mapNotNull { idx ->
+            val otherSum = charCounts.sum() - charCounts[idx]
+            val otherAvg = otherSum.toDouble() / (pages.size - 1)
+            if (otherAvg > 0.0 && charCounts[idx] < (otherAvg * COMPLETENESS_THRESHOLD_RATIO)) {
+                pages[idx].pageNumber
+            } else {
+                null
+            }
+        }.toSet()
     }
 
     private fun writeWarningParagraph(
@@ -316,6 +341,9 @@ class WordGenerator(
         const val UNRESOLVED_TEXT_RED_HEX = "B71C1C"
         const val ACADEMIC_BODY_FONT_SIZE_PT = 14
         const val ACADEMIC_HEADING_FONT_SIZE_PT = 16
+        private const val COMPLETENESS_THRESHOLD_RATIO = 0.20
+        const val INCOMPLETE_PAGE_WARNING_MESSAGE =
+            "تحذير: يبدو أن هذه الصفحة لم يتم استخراج نصها بالكامل. يرجى مراجعة الصورة الأصلية."
         private const val HEADING_MAX_LENGTH = 65
         private const val HEADING_MAX_WORDS = 9
         private val WHITESPACE_REGEX = Regex("\\s+")

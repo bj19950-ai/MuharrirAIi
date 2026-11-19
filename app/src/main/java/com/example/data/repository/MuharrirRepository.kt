@@ -371,7 +371,26 @@ class MuharrirRepository(
                             )
                             result.fold(
                                 onSuccess = { ocrResult ->
-                                    ocrResultDao.upsertOcrResult(ocrResult.toEntity())
+                                    val trimmedOcr = ocrResult.recognizedText.trim()
+                                    val needsFallback = trimmedOcr.isEmpty() ||
+                                        (trimmedOcr.length < MIN_OCR_FALLBACK_CHAR_THRESHOLD && !isVisuallyEmptyBitmap(rawBitmap))
+
+                                    val finalOcrResult = if (needsFallback && geminiCoordinator != null) {
+                                        val fallbackText = geminiCoordinator.extractTextFallbackWithFailover(
+                                            pageNumber = page.originalPageNumber,
+                                            rawPageBitmap = rawBitmap,
+                                        ).getOrNull()?.trim()
+
+                                        if (!fallbackText.isNullOrEmpty() && fallbackText.length > trimmedOcr.length) {
+                                            ocrResult.copy(recognizedText = fallbackText)
+                                        } else {
+                                            ocrResult
+                                        }
+                                    } else {
+                                        ocrResult
+                                    }
+
+                                    ocrResultDao.upsertOcrResult(finalOcrResult.toEntity())
                                     pageDao.updatePageOcrState(
                                         pageId = page.pageId,
                                         pageStatus = PageStatus.OCR_DONE.name,
@@ -1139,7 +1158,41 @@ class MuharrirRepository(
         )
     }
 
+    private fun isVisuallyEmptyBitmap(bitmap: Bitmap): Boolean {
+        val width = bitmap.width
+        val height = bitmap.height
+        if (width <= 0 || height <= 0) return true
+
+        val stepX = (width / 32).coerceAtLeast(1)
+        val stepY = (height / 32).coerceAtLeast(1)
+        var nonWhitePixels = 0
+
+        var y = 0
+        while (y < height) {
+            var x = 0
+            while (x < width) {
+                val pixel = bitmap.getPixel(x, y)
+                val r = (pixel shr 16) and 0xFF
+                val g = (pixel shr 8) and 0xFF
+                val b = pixel and 0xFF
+                val luminance = (r * 299 + g * 587 + b * 114) / 1000
+                if (luminance < 220) {
+                    nonWhitePixels++
+                    if (nonWhitePixels >= VISUAL_NON_WHITE_MIN_PIXELS) {
+                        return false
+                    }
+                }
+                x += stepX
+            }
+            y += stepY
+        }
+        return true
+    }
+
     companion object {
+        private const val MIN_OCR_FALLBACK_CHAR_THRESHOLD = 150
+        private const val VISUAL_NON_WHITE_MIN_PIXELS = 8
+
         fun createDefault(context: Context): MuharrirRepository {
             val appContext = context.applicationContext
             val keyVault = EncryptedGeminiApiKeyVault(appContext)

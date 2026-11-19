@@ -9,6 +9,11 @@ import androidx.test.core.app.ApplicationProvider
 import com.example.data.local.DocumentEntity
 import com.example.data.local.MuharrirDatabase
 import com.example.data.local.PageEntity
+import com.example.data.gemini.EncryptedGeminiApiKeyVault
+import com.example.data.gemini.GeminiAnalysisCoordinator
+import com.example.data.gemini.GeminiPageClient
+import com.example.data.gemini.GeminiPagePromptPayload
+import com.example.data.gemini.GeminiPromptBuilder
 import com.example.data.ocr.MlKitOcrEngine
 import com.example.data.ocr.OcrEngineRegistry
 import com.example.data.ocr.OcrImagePreprocessor
@@ -605,6 +610,122 @@ class Module03OcrAdapterTest {
         // Pages must remain untouched in PENDING state
         val doc = repo.getDocumentById("doc-unavailable")!!
         assertTrue(doc.pages.all { it.ocrStatus == OcrPageStatus.PENDING })
+        db.close()
+    }
+
+    @Test
+    fun `runDocumentOcr triggers Gemini fallback when OCR returns empty or short text on non-blank page`() = runTest {
+        val db = openTestDatabase()
+        seedDocument(db, docId = "doc-fallback-m11", pageCount = 3)
+
+        val prefsName = "test_m11_vault"
+        context.deleteSharedPreferences(prefsName)
+        val vault = EncryptedGeminiApiKeyVault(
+            prefsProvider = { context.getSharedPreferences(prefsName, Context.MODE_PRIVATE) },
+        )
+        vault.addKey("FallbackKey", "AIzaSyFallbackTestKey123456")
+
+        val fallbackPrompts = mutableListOf<String>()
+        val fallbackClient = object : GeminiPageClient {
+            override suspend fun validateKey(apiKey: String, modelId: String) = Result.success(Unit)
+            override suspend fun analyzePage(
+                apiKey: String,
+                modelId: String,
+                pageBitmap: Bitmap,
+                payload: GeminiPagePromptPayload,
+            ) = Result.success("{}")
+
+            override suspend fun extractPlainText(
+                apiKey: String,
+                modelId: String,
+                pageBitmap: Bitmap,
+                prompt: String,
+            ): Result<String> {
+                fallbackPrompts.add(prompt)
+                return Result.success("النص الكامل المستخرج عبر Gemini للصفحة الكثيفة التي تعذّر استخراجها محلياً.")
+            }
+        }
+        val coordinator = GeminiAnalysisCoordinator(vault, fallbackClient)
+
+        val mixedPdfEngine = object : PdfPageEngine {
+            override suspend fun indexPages(
+                pdfFile: File,
+                batchSize: Int,
+                onBatchIndexed: suspend (Int, Int, List<IndexedPdfPageMeta>) -> Unit,
+            ) = PrivatePdfIndexResult.Success(3, (1..3).map { IndexedPdfPageMeta(it, 595, 842) })
+
+            override suspend fun renderFromFile(pdfFile: File, pageIndex: Int, maxWidthPx: Int): Bitmap {
+                val bmp = Bitmap.createBitmap(400, 600, Bitmap.Config.ARGB_8888)
+                bmp.eraseColor(Color.WHITE)
+                // Page 2 (index 1) has dark ink content (not visually empty)
+                if (pageIndex == 1) {
+                    val canvas = android.graphics.Canvas(bmp)
+                    val paint = android.graphics.Paint().apply { color = Color.BLACK }
+                    canvas.drawRect(30f, 30f, 360f, 520f, paint)
+                }
+                return bmp
+            }
+        }
+
+        val partialOcrAdapter = object : OcrEngineAdapter {
+            override val engineType = OcrEngineType.TESSERACT
+            override val supportsArabicScript = true
+            override val capabilityNoteAr = "محاكاة تيسراكت"
+            override suspend fun checkAvailability() = OcrAvailabilityResult.Ready
+            override suspend fun recognizePage(
+                documentId: String,
+                pageId: String,
+                pageNumber: Int,
+                pageBitmap: Bitmap,
+            ): Result<OcrResult> {
+                val text = when (pageNumber) {
+                    1 -> "" // 0 chars -> must trigger fallback
+                    2 -> "سطر ناقص" // < 150 chars on visually dense page -> must trigger fallback
+                    else -> "ملاحظة هامشية" // < 150 chars on visually blank page -> should NOT trigger fallback
+                }
+                return Result.success(
+                    OcrResult(
+                        pageId = pageId,
+                        documentId = documentId,
+                        pageNumber = pageNumber,
+                        recognizedText = text,
+                        segments = emptyList(),
+                        boundingBoxes = emptyList(),
+                        confidence = 0.5f,
+                        engineType = OcrEngineType.TESSERACT,
+                        imageWidthPx = pageBitmap.width,
+                        imageHeightPx = pageBitmap.height,
+                    ),
+                )
+            }
+        }
+
+        val repo = MuharrirRepository(
+            database = db,
+            storage = storage,
+            pageEngine = mixedPdfEngine,
+            ocrEngineRegistry = OcrEngineRegistry(mapOf(OcrEngineType.TESSERACT to partialOcrAdapter)),
+            geminiKeyVault = vault,
+            geminiCoordinator = coordinator,
+        )
+
+        val outcome = repo.runDocumentOcr(context, "doc-fallback-m11", OcrEngineType.TESSERACT)
+        assertTrue(outcome is OcrRunOutcome.Completed)
+
+        // Fallback triggered exactly twice (page 1 empty + page 2 short non-blank)
+        assertEquals(2, fallbackPrompts.size)
+        assertEquals(GeminiPromptBuilder.FALLBACK_OCR_PROMPT, fallbackPrompts[0])
+
+        val doc = repo.getDocumentById("doc-fallback-m11")!!
+        val p1Text = doc.pages.first { it.originalPageNumber == 1 }.ocrResult!!.recognizedText
+        val p2Text = doc.pages.first { it.originalPageNumber == 2 }.ocrResult!!.recognizedText
+        val p3Text = doc.pages.first { it.originalPageNumber == 3 }.ocrResult!!.recognizedText
+
+        assertTrue(p1Text.contains("النص الكامل المستخرج عبر Gemini"))
+        assertTrue(p2Text.contains("النص الكامل المستخرج عبر Gemini"))
+        assertEquals("ملاحظة هامشية", p3Text)
+
+        context.deleteSharedPreferences(prefsName)
         db.close()
     }
 }

@@ -28,9 +28,21 @@ interface GeminiPageClient {
         pageBitmap: Bitmap,
         payload: GeminiPagePromptPayload,
     ): Result<String>
+
+    suspend fun extractPlainText(
+        apiKey: String,
+        modelId: String,
+        pageBitmap: Bitmap,
+        prompt: String = GeminiPromptBuilder.FALLBACK_OCR_PROMPT,
+    ): Result<String> = Result.failure(
+        UnsupportedOperationException("استخراج النص الاحتياطي غير مدعوم في هذا العميل."),
+    )
 }
 
 object GeminiPromptBuilder {
+
+    const val FALLBACK_OCR_PROMPT =
+        "Extract ALL the Arabic text from this page exactly as it appears. Do not summarize. Return only the extracted text."
 
     val SYSTEM_INSTRUCTION = """
         You are Muharrir AI (مُحَرِّر AI), an expert Arabic paleography, academic, and legal document verification engine.
@@ -163,6 +175,40 @@ class GoogleAiGeminiClient : GeminiPageClient {
             val text = response.text?.trim()
             if (text.isNullOrEmpty()) {
                 Result.failure(IllegalStateException("أرجع نموذج Gemini استجابة نصية فارغة."))
+            } else {
+                Result.success(text)
+            }
+        } catch (cancel: CancellationException) {
+            throw cancel
+        } catch (t: Throwable) {
+            Result.failure(t)
+        }
+    }
+
+    override suspend fun extractPlainText(
+        apiKey: String,
+        modelId: String,
+        pageBitmap: Bitmap,
+        prompt: String,
+    ): Result<String> {
+        return try {
+            val model = GenerativeModel(
+                modelName = modelId,
+                apiKey = apiKey,
+                generationConfig = generationConfig {
+                    temperature = GeminiModelConfig.TEMPERATURE
+                },
+            )
+
+            val input = content {
+                image(pageBitmap)
+                text(prompt)
+            }
+
+            val response = model.generateContent(input)
+            val text = response.text?.trim()
+            if (text.isNullOrEmpty()) {
+                Result.failure(IllegalStateException("أرجع نموذج Gemini استجابة نصية فارغة أثناء الاستخراج الاحتياطي."))
             } else {
                 Result.success(text)
             }
