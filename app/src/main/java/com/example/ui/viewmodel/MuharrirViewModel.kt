@@ -68,9 +68,27 @@ data class NewDocumentUiState(
     val isLoadingPreviewPage: Boolean = false,
     val previewNoteAr: String? = null,
     val validationErrorAr: String? = null,
+    val startPageInput: String = "",
+    val endPageInput: String = "",
+    val pageRangeErrorAr: String? = null,
 ) {
     val hasValidSelection: Boolean
         get() = selectedUriString != null && fileName != null && validationErrorAr == null
+
+    val parsedStartPage: Int?
+        get() = startPageInput.trim().toIntOrNull()
+
+    val parsedEndPage: Int?
+        get() = endPageInput.trim().toIntOrNull()
+
+    val isPageRangeValid: Boolean
+        get() {
+            val total = pageCount ?: return true
+            if (total <= 0) return true
+            val start = parsedStartPage ?: return false
+            val end = parsedEndPage ?: return false
+            return pageRangeErrorAr == null && start >= 1 && end <= total && start <= end
+        }
 }
 
 data class DashboardUiState(
@@ -148,6 +166,9 @@ class MuharrirViewModel(
 
     private val _geminiExecutionState = MutableStateFlow(GeminiExecutionUiState())
     val geminiExecutionState: StateFlow<GeminiExecutionUiState> = _geminiExecutionState.asStateFlow()
+
+    private val _documentPageRanges = MutableStateFlow<Map<String, IntRange>>(emptyMap())
+    val documentPageRanges: StateFlow<Map<String, IntRange>> = _documentPageRanges.asStateFlow()
 
     private val _testingKeyId = MutableStateFlow<String?>(null)
     val testingKeyId: StateFlow<String?> = _testingKeyId.asStateFlow()
@@ -256,6 +277,16 @@ class MuharrirViewModel(
         initialValue = null,
     )
 
+    val pagesNeedingReprocessingCount: StateFlow<Int> = activeDocument
+        .flatMapLatest { doc ->
+            if (doc == null) flowOf(0) else repository.observeCountPagesNeedingReprocessing(doc.id)
+        }
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(5_000),
+            initialValue = 0,
+        )
+
     init {
         viewModelScope.launch {
             repository.prepareTesseractAssets(getApplication())
@@ -319,6 +350,7 @@ class MuharrirViewModel(
         viewModelScope.launch {
             when (val result = PdfInspector.inspectPdf(appContext, uri)) {
                 is PdfInspectionResult.Valid -> {
+                    val defaultEnd = (result.pageCount ?: 1).coerceAtLeast(1)
                     _newDocState.update {
                         it.copy(
                             isInspecting = false,
@@ -330,6 +362,9 @@ class MuharrirViewModel(
                             currentPreviewPage = 0,
                             previewNoteAr = result.previewNoteAr,
                             validationErrorAr = null,
+                            startPageInput = "1",
+                            endPageInput = defaultEnd.toString(),
+                            pageRangeErrorAr = null,
                         )
                     }
                 }
@@ -343,10 +378,48 @@ class MuharrirViewModel(
                             pageCount = null,
                             previewBitmap = null,
                             validationErrorAr = result.reasonAr,
+                            startPageInput = "",
+                            endPageInput = "",
+                            pageRangeErrorAr = null,
                         )
                     }
                 }
             }
+        }
+    }
+
+    fun updateNewDocumentPageRange(startPageText: String, endPageText: String) {
+        val current = _newDocState.value
+        val total = current.pageCount
+        val error = validatePageRangeInputs(
+            startText = startPageText,
+            endText = endPageText,
+            totalPages = total,
+        )
+        _newDocState.update {
+            it.copy(
+                startPageInput = startPageText,
+                endPageInput = endPageText,
+                pageRangeErrorAr = error,
+            )
+        }
+    }
+
+    private fun validatePageRangeInputs(
+        startText: String,
+        endText: String,
+        totalPages: Int?,
+    ): String? {
+        if (totalPages == null || totalPages <= 0) return null
+        val start = startText.trim().toIntOrNull()
+            ?: return "يرجى إدخال رقم صفحة بداية صحيح."
+        val end = endText.trim().toIntOrNull()
+            ?: return "يرجى إدخال رقم صفحة نهاية صحيح."
+        return when {
+            start < 1 -> "يجب أن تكون صفحة البداية 1 أو أكبر."
+            end > totalPages -> "يجب ألا تتجاوز صفحة النهاية عدد الصفحات ($totalPages)."
+            start > end -> "يجب أن تكون «من صفحة» أصغر من أو تساوي «إلى صفحة»."
+            else -> null
         }
     }
 
@@ -398,15 +471,19 @@ class MuharrirViewModel(
 
     fun startNewDocumentTask(
         context: Context,
+        startPage: Int? = null,
+        endPage: Int? = null,
         onImported: (DocumentRecord) -> Unit,
     ) {
         val current = _newDocState.value
         val uriString = current.selectedUriString ?: return
         val uri = runCatching { Uri.parse(uriString) }.getOrNull() ?: return
-        if (current.validationErrorAr != null || current.isImporting) return
+        if (current.validationErrorAr != null || current.pageRangeErrorAr != null || current.isImporting) return
 
         val appContext = context.applicationContext
         val replaceId = current.replaceDocumentId
+        val requestedStart = startPage ?: current.parsedStartPage ?: 1
+        val requestedEnd = endPage ?: current.parsedEndPage ?: (current.pageCount ?: 1)
 
         activeImportJob?.cancel()
         activeImportJob = viewModelScope.launch {
@@ -435,14 +512,24 @@ class MuharrirViewModel(
 
             when (outcome) {
                 is ImportOutcome.Success -> {
+                    val total = (outcome.document.pageCount ?: outcome.document.pages.size).coerceAtLeast(1)
+                    val validStart = requestedStart.coerceIn(1, total)
+                    val validEnd = requestedEnd.coerceIn(validStart, total)
+                    _documentPageRanges.update { it + (outcome.document.id to (validStart..validEnd)) }
+
                     _selectedDocumentId.value = outcome.document.id
-                    _workspacePreviewPage.value = 0
+                    _workspacePreviewPage.value = (validStart - 1).coerceIn(0, (total - 1).coerceAtLeast(0))
                     _workspacePreviewBitmap.value = current.previewBitmap
                     _pageThumbnails.value = emptyMap()
-                    _workspaceNoticeAr.value = if (replaceId != null) {
-                        "تم استبدال ملف PDF وحفظ النسخة الجديدة وفهرسة ${outcome.document.pageCount ?: 0} صفحة بنجاح."
+                    val rangeNote = if (validStart > 1 || validEnd < total) {
+                        " بنطاق معالجة من صفحة $validStart إلى $validEnd."
                     } else {
-                        "تم استيراد المستند وحفظه في التخزين الخاص للتطبيق (${outcome.document.pageCount ?: 0} صفحة)."
+                        "."
+                    }
+                    _workspaceNoticeAr.value = if (replaceId != null) {
+                        "تم استبدال ملف PDF وحفظ النسخة الجديدة وفهرسة $total صفحة$rangeNote"
+                    } else {
+                        "تم استيراد المستند وحفظه في التخزين الخاص للتطبيق ($total صفحة)$rangeNote"
                     }
                     _newDocState.value = NewDocumentUiState()
                     onImported(outcome.document)
@@ -495,12 +582,26 @@ class MuharrirViewModel(
         }
     }
 
-    fun startOrResumeOcr(context: Context, documentId: String) {
+    fun startOrResumeOcr(
+        context: Context,
+        documentId: String,
+        startPage: Int? = null,
+        endPage: Int? = null,
+    ) {
+        val storedRange = _documentPageRanges.value[documentId]
+        val effectiveStart = (startPage ?: storedRange?.first ?: 1).coerceAtLeast(1)
+        val effectiveEnd = (endPage ?: storedRange?.last ?: Int.MAX_VALUE).coerceAtLeast(effectiveStart)
+        if (startPage != null && endPage != null) {
+            _documentPageRanges.update { it + (documentId to (effectiveStart..effectiveEnd)) }
+        }
         launchOcrJob(
             context = context,
             documentId = documentId,
             retryFailedOnly = false,
             singlePageId = null,
+            startPage = effectiveStart,
+            endPage = effectiveEnd,
+            reprocessFailedAndShortOnly = false,
         )
     }
 
@@ -510,6 +611,21 @@ class MuharrirViewModel(
             documentId = documentId,
             retryFailedOnly = true,
             singlePageId = null,
+            startPage = 1,
+            endPage = Int.MAX_VALUE,
+            reprocessFailedAndShortOnly = false,
+        )
+    }
+
+    fun reprocessFailedPages(context: Context, documentId: String) {
+        launchOcrJob(
+            context = context,
+            documentId = documentId,
+            retryFailedOnly = false,
+            singlePageId = null,
+            startPage = 1,
+            endPage = Int.MAX_VALUE,
+            reprocessFailedAndShortOnly = true,
         )
     }
 
@@ -519,6 +635,9 @@ class MuharrirViewModel(
             documentId = documentId,
             retryFailedOnly = false,
             singlePageId = pageId,
+            startPage = 1,
+            endPage = Int.MAX_VALUE,
+            reprocessFailedAndShortOnly = false,
         )
     }
 
@@ -534,6 +653,9 @@ class MuharrirViewModel(
         documentId: String,
         retryFailedOnly: Boolean,
         singlePageId: String?,
+        startPage: Int = 1,
+        endPage: Int = Int.MAX_VALUE,
+        reprocessFailedAndShortOnly: Boolean = false,
     ) {
         if (_ocrExecutionState.value.isRunning) return
         val appContext = context.applicationContext
@@ -566,6 +688,9 @@ class MuharrirViewModel(
                 engineType = engineType,
                 retryFailedOnly = retryFailedOnly,
                 singlePageId = singlePageId,
+                startPage = startPage,
+                endPage = endPage,
+                reprocessFailedAndShortOnly = reprocessFailedAndShortOnly,
                 onProgress = { progress ->
                     _ocrExecutionState.update {
                         it.copy(
@@ -584,12 +709,16 @@ class MuharrirViewModel(
             when (outcome) {
                 is OcrRunOutcome.Completed -> {
                     _workspaceNoticeAr.value = when {
+                        reprocessFailedAndShortOnly && outcome.processedNow == 0 ->
+                            "لا توجد صفحات فاشلة أو ذات نص ناقص تحتاج لإعادة المعالجة."
+                        reprocessFailedAndShortOnly ->
+                            "أُعيدت معالجة ${outcome.processedNow} صفحة؛ الإجمالي المكتمل الآن ${outcome.totalDonePages} من ${outcome.totalPages}."
                         outcome.processedNow == 0 && outcome.totalFailedPages > 0 ->
-                            "لا توجد صفحات معلّقة؛ يوجد ${outcome.totalFailedPages} صفحة فاشلة يمكنك إعادة محاولتها."
+                            "لا توجد صفحات معلّقة في النطاق المحدد؛ يوجد ${outcome.totalFailedPages} صفحة فاشلة يمكنك إعادة معالجتها."
                         outcome.processedNow == 0 ->
-                            "جميع صفحات المستند (${outcome.totalDonePages} من ${outcome.totalPages}) مكتملة الاستخراج بالفعل."
+                            "جميع صفحات النطاق المحدد (${outcome.totalDonePages} من ${outcome.totalPages}) مكتملة الاستخراج بالفعل."
                         outcome.totalFailedPages > 0 ->
-                            "اكتمل استخراج ${outcome.totalDonePages} من ${outcome.totalPages} صفحة محلياً، وفشلت ${outcome.totalFailedPages} صفحة."
+                            "اكتمل استخراج ${outcome.totalDonePages} من ${outcome.totalPages} صفحة، وفشلت ${outcome.totalFailedPages} صفحة."
                         else ->
                             "تم استخراج وحفظ نتائج ${outcome.totalDonePages} من ${outcome.totalPages} صفحة بنجاح عبر ${engineType.displayNameAr}."
                     }

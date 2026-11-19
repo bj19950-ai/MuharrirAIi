@@ -155,6 +155,8 @@ fun MuharrirApp(
     val settingsNotice by viewModel.settingsNoticeAr.collectAsStateWithLifecycle()
     val ocrExecutionState by viewModel.ocrExecutionState.collectAsStateWithLifecycle()
     val geminiExecutionState by viewModel.geminiExecutionState.collectAsStateWithLifecycle()
+    val documentPageRanges by viewModel.documentPageRanges.collectAsStateWithLifecycle()
+    val pagesNeedingReprocessingCount by viewModel.pagesNeedingReprocessingCount.collectAsStateWithLifecycle()
     val appearancePreferences by viewModel.appearancePreferences.collectAsStateWithLifecycle()
     var showLaunchSplash by rememberSaveable { mutableStateOf(true) }
 
@@ -355,8 +357,9 @@ fun MuharrirApp(
                             onChangePreviewPage = viewModel::changeNewDocPreviewPage,
                             onClearSelection = viewModel::clearSelectedPdf,
                             onCancelReplacementMode = viewModel::clearReplacementMode,
-                            onStartDocumentTask = { context ->
-                                viewModel.startNewDocumentTask(context) {
+                            onPageRangeChanged = viewModel::updateNewDocumentPageRange,
+                            onStartDocumentTask = { context, startPage, endPage ->
+                                viewModel.startNewDocumentTask(context, startPage, endPage) {
                                     navigateToRoute(MuharrirRoutes.ROUTE_WORKSPACE)
                                 }
                             },
@@ -371,6 +374,8 @@ fun MuharrirApp(
                             preferredExportMode = preferences.preferredExportMode,
                             backendConnectionState = viewModel.backendConnectionState,
                             ocrState = ocrExecutionState,
+                            selectedPageRange = activeDocument?.let { documentPageRanges[it.id] },
+                            pagesNeedingReprocessingCount = pagesNeedingReprocessingCount,
                             geminiState = geminiExecutionState,
                             geminiKeys = geminiKeys,
                             geminiUsageStats = geminiUsageStats,
@@ -385,7 +390,7 @@ fun MuharrirApp(
                             onSelectOcrEngine = viewModel::setOcrEngine,
                             onStartOrResumeOcr = viewModel::startOrResumeOcr,
                             onPauseOcr = viewModel::pauseOcr,
-                            onRetryFailedOcr = viewModel::retryFailedOcrPages,
+                            onReprocessFailedPages = viewModel::reprocessFailedPages,
                             onRetrySingleOcrPage = viewModel::retrySingleOcrPage,
                             onStartGeminiAnalysis = viewModel::startGeminiAnalysis,
                             onPauseGeminiAnalysis = viewModel::pauseGeminiAnalysis,

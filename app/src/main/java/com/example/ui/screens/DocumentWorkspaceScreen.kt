@@ -59,7 +59,9 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -77,6 +79,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -116,6 +119,8 @@ fun DocumentWorkspaceScreen(
     preferredExportMode: ExportMode,
     backendConnectionState: BackendConnectionState,
     ocrState: OcrExecutionUiState,
+    selectedPageRange: IntRange? = null,
+    pagesNeedingReprocessingCount: Int = 0,
     geminiState: GeminiExecutionUiState,
     geminiKeys: List<GeminiKeyRecord>,
     geminiUsageStats: GeminiUsageStats,
@@ -128,9 +133,9 @@ fun DocumentWorkspaceScreen(
     onRequestPreviewPage: (android.content.Context, DocumentRecord, Int) -> Unit,
     onRequestPageThumbnail: (DocumentRecord, Int) -> Unit,
     onSelectOcrEngine: (OcrEngineType) -> Unit,
-    onStartOrResumeOcr: (android.content.Context, String) -> Unit,
+    onStartOrResumeOcr: (android.content.Context, String, Int?, Int?) -> Unit,
     onPauseOcr: () -> Unit,
-    onRetryFailedOcr: (android.content.Context, String) -> Unit,
+    onReprocessFailedPages: (android.content.Context, String) -> Unit,
     onRetrySingleOcrPage: (android.content.Context, String, String) -> Unit,
     onStartGeminiAnalysis: (String, String?) -> Unit,
     onPauseGeminiAnalysis: () -> Unit,
@@ -346,10 +351,14 @@ fun DocumentWorkspaceScreen(
                     OnDeviceOcrCard(
                         document = document,
                         ocrState = ocrState,
+                        selectedPageRange = selectedPageRange,
+                        pagesNeedingReprocessingCount = pagesNeedingReprocessingCount,
                         onSelectOcrEngine = onSelectOcrEngine,
-                        onStartOrResume = { onStartOrResumeOcr(context, document.id) },
+                        onStartOrResume = { startPage, endPage ->
+                            onStartOrResumeOcr(context, document.id, startPage, endPage)
+                        },
                         onPause = onPauseOcr,
-                        onRetryFailed = { onRetryFailedOcr(context, document.id) },
+                        onReprocessFailedPages = { onReprocessFailedPages(context, document.id) },
                     )
                 }
 
@@ -1075,10 +1084,12 @@ private fun OriginalPdfAccessCard(
 private fun OnDeviceOcrCard(
     document: DocumentRecord,
     ocrState: OcrExecutionUiState,
+    selectedPageRange: IntRange?,
+    pagesNeedingReprocessingCount: Int,
     onSelectOcrEngine: (OcrEngineType) -> Unit,
-    onStartOrResume: () -> Unit,
+    onStartOrResume: (Int, Int) -> Unit,
     onPause: () -> Unit,
-    onRetryFailed: () -> Unit,
+    onReprocessFailedPages: () -> Unit,
 ) {
     val pages = document.pages
     val totalCount = pages.size
@@ -1088,6 +1099,87 @@ private fun OnDeviceOcrCard(
     val isThisDocRunning = ocrState.isRunning && ocrState.activeDocumentId == document.id
     val isEngineAvailable = ocrState.availability !is OcrAvailabilityResult.Unavailable
     val progressRatio = if (totalCount == 0) 0f else doneCount.toFloat() / totalCount.toFloat()
+
+    val fallbackCandidateCount = remember(pages) {
+        pages.count { page ->
+            page.ocrStatus == OcrPageStatus.FAILED ||
+                (page.ocrResult != null && page.ocrResult.recognizedText.trim().length < 150) ||
+                (page.ocrStatus == OcrPageStatus.DONE && page.ocrResult == null)
+        }
+    }
+    val effectiveReprocessCount = if (pagesNeedingReprocessingCount > 0) {
+        pagesNeedingReprocessingCount
+    } else {
+        fallbackCandidateCount
+    }
+
+    var startPageText by remember(document.id, totalCount, selectedPageRange) {
+        val defaultStart = (selectedPageRange?.first ?: 1).coerceIn(1, totalCount.coerceAtLeast(1))
+        mutableStateOf(defaultStart.toString())
+    }
+    var endPageText by remember(document.id, totalCount, selectedPageRange) {
+        val defaultEnd = (selectedPageRange?.last ?: totalCount).coerceIn(1, totalCount.coerceAtLeast(1))
+        mutableStateOf(defaultEnd.toString())
+    }
+    var showReprocessConfirmation by remember(document.id) { mutableStateOf(false) }
+
+    val parsedStart = startPageText.trim().toIntOrNull()
+    val parsedEnd = endPageText.trim().toIntOrNull()
+    val rangeErrorAr = when {
+        totalCount == 0 -> null
+        parsedStart == null || parsedEnd == null -> "يرجى إدخال رقمي صفحة بداية ونهاية صحيحين."
+        parsedStart < 1 -> "يجب أن تبدأ صفحة البداية من 1 على الأقل."
+        parsedEnd > totalCount -> "يجب ألا تتجاوز صفحة النهاية إجمالي الصفحات ($totalCount)."
+        parsedStart > parsedEnd -> "يجب أن تكون «من صفحة» أصغر من أو تساوي «إلى صفحة»."
+        else -> null
+    }
+    val validRange = if (rangeErrorAr == null && parsedStart != null && parsedEnd != null) {
+        parsedStart..parsedEnd
+    } else {
+        null
+    }
+    val pendingInRangeCount = if (validRange != null) {
+        pages.count {
+            it.originalPageNumber in validRange &&
+                (it.ocrStatus == OcrPageStatus.PENDING || it.ocrStatus == OcrPageStatus.RUNNING)
+        }
+    } else {
+        0
+    }
+
+    if (showReprocessConfirmation) {
+        AlertDialog(
+            onDismissRequest = { showReprocessConfirmation = false },
+            title = { Text("إعادة معالجة الصفحات الفاشلة فقط") },
+            text = {
+                Text(
+                    text = "سيتم إعادة معالجة $effectiveReprocessCount صفحة فقط. هل أنت متأكد؟",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showReprocessConfirmation = false
+                        onReprocessFailedPages()
+                    },
+                    modifier = Modifier
+                        .heightIn(min = 48.dp)
+                        .testTag("confirm_reprocess_failed_pages_button"),
+                ) {
+                    Text("تأكيد وإعادة المعالجة")
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { showReprocessConfirmation = false },
+                    modifier = Modifier.heightIn(min = 48.dp),
+                ) {
+                    Text("إلغاء")
+                }
+            },
+        )
+    }
 
     Card(
         modifier = Modifier
@@ -1205,15 +1297,55 @@ private fun OnDeviceOcrCard(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
 
-            Row(
+            if (totalCount > 0 && !isThisDocRunning) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    OutlinedTextField(
+                        value = startPageText,
+                        onValueChange = { startPageText = it.filter { ch -> ch.isDigit() } },
+                        label = { Text("من صفحة") },
+                        singleLine = true,
+                        enabled = !ocrState.isRunning,
+                        isError = rangeErrorAr != null,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("workspace_ocr_start_page_input"),
+                    )
+                    OutlinedTextField(
+                        value = endPageText,
+                        onValueChange = { endPageText = it.filter { ch -> ch.isDigit() } },
+                        label = { Text("إلى صفحة") },
+                        singleLine = true,
+                        enabled = !ocrState.isRunning,
+                        isError = rangeErrorAr != null,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("workspace_ocr_end_page_input"),
+                    )
+                }
+                if (rangeErrorAr != null) {
+                    Text(
+                        text = rangeErrorAr,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.testTag("workspace_ocr_page_range_error"),
+                    )
+                }
+            }
+
+            Column(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
                 if (isThisDocRunning) {
                     OutlinedButton(
                         onClick = onPause,
                         modifier = Modifier
-                            .weight(1f)
+                            .fillMaxWidth()
                             .heightIn(min = 48.dp)
                             .testTag("ocr_pause_button"),
                     ) {
@@ -1227,10 +1359,14 @@ private fun OnDeviceOcrCard(
                     }
                 } else {
                     Button(
-                        onClick = onStartOrResume,
-                        enabled = isEngineAvailable && !ocrState.isRunning && (pendingCount > 0 || doneCount == 0),
+                        onClick = {
+                            if (validRange != null) {
+                                onStartOrResume(validRange.first, validRange.last)
+                            }
+                        },
+                        enabled = isEngineAvailable && !ocrState.isRunning && validRange != null && pendingInRangeCount > 0,
                         modifier = Modifier
-                            .weight(1f)
+                            .fillMaxWidth()
                             .heightIn(min = 48.dp)
                             .testTag("ocr_start_resume_button"),
                     ) {
@@ -1243,30 +1379,30 @@ private fun OnDeviceOcrCard(
                         Text(
                             text = when {
                                 !isEngineAvailable -> "المحرك غير متاح"
-                                doneCount > 0 && pendingCount > 0 -> "استئناف OCR"
-                                doneCount == totalCount && totalCount > 0 -> "اكتمل OCR"
+                                validRange != null && pendingInRangeCount == 0 && doneCount > 0 -> "اكتمل النطاق المحدد"
+                                doneCount > 0 && pendingInRangeCount > 0 -> "استئناف OCR"
                                 else -> "بدء استخراج النص"
                             },
                         )
                     }
-                }
 
-                if (failedCount > 0 && !isThisDocRunning) {
-                    OutlinedButton(
-                        onClick = onRetryFailed,
-                        enabled = isEngineAvailable && !ocrState.isRunning,
-                        modifier = Modifier
-                            .weight(1f)
-                            .heightIn(min = 48.dp)
-                            .testTag("ocr_retry_failed_button"),
-                    ) {
-                        Icon(
-                            imageVector = Icons.Rounded.Refresh,
-                            contentDescription = null,
-                            modifier = Modifier.size(18.dp),
-                        )
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text("إعادة الفاشلة ($failedCount)")
+                    if (effectiveReprocessCount > 0) {
+                        OutlinedButton(
+                            onClick = { showReprocessConfirmation = true },
+                            enabled = isEngineAvailable && !ocrState.isRunning,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(min = 48.dp)
+                                .testTag("reprocess_failed_pages_button"),
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.Refresh,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp),
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("إعادة معالجة الصفحات الفاشلة فقط")
+                        }
                     }
                 }
             }

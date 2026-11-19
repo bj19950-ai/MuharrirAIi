@@ -40,7 +40,9 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -53,6 +55,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.ui.components.ScholarlyInfoBanner
@@ -68,7 +71,8 @@ fun NewDocumentScreen(
     onChangePreviewPage: (android.content.Context, Int) -> Unit,
     onClearSelection: () -> Unit,
     onCancelReplacementMode: () -> Unit,
-    onStartDocumentTask: (android.content.Context) -> Unit,
+    onPageRangeChanged: (String, String) -> Unit,
+    onStartDocumentTask: (android.content.Context, Int, Int) -> Unit,
     onCancelActiveImport: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -357,6 +361,15 @@ fun NewDocumentScreen(
                     SelectedFileMetadataCard(state = state)
                 }
 
+                if ((state.pageCount ?: 0) > 0) {
+                    item {
+                        PageRangeSelectionCard(
+                            state = state,
+                            onPageRangeChanged = onPageRangeChanged,
+                        )
+                    }
+                }
+
                 item {
                     PdfPreviewCard(
                         state = state,
@@ -366,9 +379,11 @@ fun NewDocumentScreen(
                 }
 
                 item {
+                    val startPage = state.parsedStartPage ?: 1
+                    val endPage = state.parsedEndPage ?: (state.pageCount ?: 1)
                     Button(
-                        onClick = { onStartDocumentTask(context) },
-                        enabled = !state.isImporting,
+                        onClick = { onStartDocumentTask(context, startPage, endPage) },
+                        enabled = !state.isImporting && state.isPageRangeValid,
                         modifier = Modifier
                             .fillMaxWidth()
                             .heightIn(min = 52.dp)
@@ -459,6 +474,87 @@ private fun SelectedFileMetadataCard(state: NewDocumentUiState) {
                 label = "عدد الصفحات",
                 value = state.pageCount?.let { "$it صفحة" } ?: "تعذر التحديد محلياً",
             )
+        }
+    }
+}
+
+@Composable
+private fun PageRangeSelectionCard(
+    state: NewDocumentUiState,
+    onPageRangeChanged: (String, String) -> Unit,
+) {
+    val totalPages = state.pageCount ?: 1
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("page_range_selection_card"),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Text(
+                text = "نطاق الصفحات للمعالجة (لتوفير الوقت ورصيد API)",
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.Bold,
+            )
+            Text(
+                text = "افتراضياً يتم تحديد كامل المستند (من 1 إلى $totalPages). يمكنك تقليص النطاق لمعالجة صفحات محددة فقط.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                OutlinedTextField(
+                    value = state.startPageInput,
+                    onValueChange = { next ->
+                        val digitsOnly = next.filter { it.isDigit() }
+                        onPageRangeChanged(digitsOnly, state.endPageInput)
+                    },
+                    label = { Text("من صفحة") },
+                    singleLine = true,
+                    enabled = !state.isImporting,
+                    isError = state.pageRangeErrorAr != null,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("new_doc_start_page_input"),
+                )
+                OutlinedTextField(
+                    value = state.endPageInput,
+                    onValueChange = { next ->
+                        val digitsOnly = next.filter { it.isDigit() }
+                        onPageRangeChanged(state.startPageInput, digitsOnly)
+                    },
+                    label = { Text("إلى صفحة") },
+                    singleLine = true,
+                    enabled = !state.isImporting,
+                    isError = state.pageRangeErrorAr != null,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("new_doc_end_page_input"),
+                )
+            }
+            if (state.pageRangeErrorAr != null) {
+                Text(
+                    text = state.pageRangeErrorAr,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.testTag("new_doc_page_range_error"),
+                )
+            } else if (state.parsedStartPage != null && state.parsedEndPage != null) {
+                val count = (state.parsedEndPage!! - state.parsedStartPage!! + 1).coerceAtLeast(1)
+                Text(
+                    text = "سيُعالج $count صفحة (من ${state.parsedStartPage} إلى ${state.parsedEndPage}) من أصل $totalPages صفحة.",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+            }
         }
     }
 }

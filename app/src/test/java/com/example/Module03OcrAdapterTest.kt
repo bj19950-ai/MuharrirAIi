@@ -8,6 +8,7 @@ import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.example.data.local.DocumentEntity
 import com.example.data.local.MuharrirDatabase
+import com.example.data.local.OcrResultEntity
 import com.example.data.local.PageEntity
 import com.example.data.gemini.EncryptedGeminiApiKeyVault
 import com.example.data.gemini.GeminiAnalysisCoordinator
@@ -726,6 +727,137 @@ class Module03OcrAdapterTest {
         assertEquals("ملاحظة هامشية", p3Text)
 
         context.deleteSharedPreferences(prefsName)
+        db.close()
+    }
+
+    @Test
+    fun `runDocumentOcr processes only pages within startPage and endPage range`() = runTest {
+        val db = openTestDatabase()
+        seedDocument(db, docId = "doc-range-m12", pageCount = 5)
+
+        val adapter = FakeOcrEngineAdapter()
+        val repo = MuharrirRepository(
+            database = db,
+            storage = storage,
+            pageEngine = FakePdfPageEngine(totalPages = 5),
+            ocrEngineRegistry = OcrEngineRegistry(mapOf(OcrEngineType.ML_KIT to adapter)),
+        )
+
+        val outcome = repo.runDocumentOcr(
+            context = context,
+            documentId = "doc-range-m12",
+            engineType = OcrEngineType.ML_KIT,
+            startPage = 2,
+            endPage = 4,
+        ) as OcrRunOutcome.Completed
+
+        assertEquals(listOf(2, 3, 4), adapter.processedPageNumbers)
+        assertEquals(3, outcome.processedNow)
+        assertEquals(3, outcome.totalDonePages)
+
+        val loaded = repo.getDocumentById("doc-range-m12")!!
+        assertEquals(OcrPageStatus.PENDING, loaded.pages[0].ocrStatus)
+        assertNull(loaded.pages[0].ocrResult)
+        assertEquals(OcrPageStatus.DONE, loaded.pages[1].ocrStatus)
+        assertEquals(OcrPageStatus.DONE, loaded.pages[2].ocrStatus)
+        assertEquals(OcrPageStatus.DONE, loaded.pages[3].ocrStatus)
+        assertEquals(OcrPageStatus.PENDING, loaded.pages[4].ocrStatus)
+        assertNull(loaded.pages[4].ocrResult)
+        db.close()
+    }
+
+    @Test
+    fun `reprocessFailedPages selects only FAILED or under-150-char pages and leaves healthy DONE pages untouched`() = runTest {
+        val db = openTestDatabase()
+        val docId = "doc-reprocess-m12"
+        seedDocument(db, docId = docId, pageCount = 4)
+
+        val longHealthyText = "النص العربي الكامل المستخرج بنجاح ".repeat(10)
+        assertTrue(longHealthyText.trim().length >= 150)
+
+        // Page 1: healthy DONE (>= 150 chars)
+        db.pageDao().updatePageOcrState(
+            pageId = "${docId}_page_1",
+            pageStatus = PageStatus.OCR_DONE.name,
+            ocrStatus = OcrPageStatus.DONE.name,
+            ocrEngineUsed = OcrEngineType.ML_KIT.name,
+            ocrErrorMessageAr = null,
+            ocrUpdatedAtMillis = 1_000L,
+        )
+        db.ocrResultDao().upsertOcrResult(
+            OcrResultEntity(
+                pageId = "${docId}_page_1",
+                documentId = docId,
+                pageNumber = 1,
+                engineType = OcrEngineType.ML_KIT.name,
+                recognizedText = longHealthyText,
+                segmentsJson = "[]",
+                confidence = null,
+                imageWidthPx = 400,
+                imageHeightPx = 600,
+                recognizedAtMillis = 1_000L,
+            ),
+        )
+
+        // Page 2: FAILED
+        db.pageDao().updatePageOcrState(
+            pageId = "${docId}_page_2",
+            pageStatus = PageStatus.FAILED.name,
+            ocrStatus = OcrPageStatus.FAILED.name,
+            ocrEngineUsed = OcrEngineType.ML_KIT.name,
+            ocrErrorMessageAr = "فشل استخراج الصفحة",
+            ocrUpdatedAtMillis = 1_000L,
+        )
+
+        // Page 3: DONE but suspiciously short (< 150 chars)
+        db.pageDao().updatePageOcrState(
+            pageId = "${docId}_page_3",
+            pageStatus = PageStatus.OCR_DONE.name,
+            ocrStatus = OcrPageStatus.DONE.name,
+            ocrEngineUsed = OcrEngineType.ML_KIT.name,
+            ocrErrorMessageAr = null,
+            ocrUpdatedAtMillis = 1_000L,
+        )
+        db.ocrResultDao().upsertOcrResult(
+            OcrResultEntity(
+                pageId = "${docId}_page_3",
+                documentId = docId,
+                pageNumber = 3,
+                engineType = OcrEngineType.ML_KIT.name,
+                recognizedText = "نص ناقص",
+                segmentsJson = "[]",
+                confidence = null,
+                imageWidthPx = 400,
+                imageHeightPx = 600,
+                recognizedAtMillis = 1_000L,
+            ),
+        )
+
+        // Page 4 remains PENDING (never processed yet)
+
+        val candidates = db.pageDao().getPagesNeedingReprocessing(docId)
+        assertEquals(listOf(2, 3), candidates.map { it.originalPageNumber })
+        assertEquals(2, db.pageDao().observeCountPagesNeedingReprocessing(docId).first())
+
+        val adapter = FakeOcrEngineAdapter()
+        val repo = MuharrirRepository(
+            database = db,
+            storage = storage,
+            pageEngine = FakePdfPageEngine(totalPages = 4),
+            ocrEngineRegistry = OcrEngineRegistry(mapOf(OcrEngineType.ML_KIT to adapter)),
+        )
+
+        val outcome = repo.reprocessFailedPages(context, docId, OcrEngineType.ML_KIT) as OcrRunOutcome.Completed
+        assertEquals(listOf(2, 3), adapter.processedPageNumbers)
+        assertEquals(2, outcome.processedNow)
+        assertEquals(3, outcome.totalDonePages)
+        assertEquals(0, outcome.totalFailedPages)
+
+        val loaded = repo.getDocumentById(docId)!!
+        assertEquals(longHealthyText, loaded.pages[0].ocrResult?.recognizedText)
+        assertEquals(OcrPageStatus.DONE, loaded.pages[1].ocrStatus)
+        assertEquals("المادة رقم 3 من القانون.", loaded.pages[2].ocrResult?.recognizedText)
+        assertEquals(OcrPageStatus.PENDING, loaded.pages[3].ocrStatus)
         db.close()
     }
 }

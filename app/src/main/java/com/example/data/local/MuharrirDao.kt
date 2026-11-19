@@ -175,6 +175,41 @@ interface PageDao {
     @Query("DELETE FROM pages WHERE documentId = :documentId")
     suspend fun deletePagesForDocument(documentId: String)
 
+    @Query(
+        """
+        SELECT pages.* FROM pages
+        LEFT JOIN ocr_results ON pages.pageId = ocr_results.pageId
+        WHERE pages.documentId = :documentId
+          AND (
+              pages.ocrStatus = 'FAILED'
+              OR (
+                  ocr_results.recognizedText IS NOT NULL
+                  AND length(trim(ocr_results.recognizedText, char(9) || char(10) || char(13) || ' ')) < 150
+              )
+              OR (pages.ocrStatus = 'DONE' AND ocr_results.recognizedText IS NULL)
+          )
+        ORDER BY pages.originalPageNumber ASC
+        """,
+    )
+    suspend fun getPagesNeedingReprocessing(documentId: String): List<PageEntity>
+
+    @Query(
+        """
+        SELECT COUNT(*) FROM pages
+        LEFT JOIN ocr_results ON pages.pageId = ocr_results.pageId
+        WHERE pages.documentId = :documentId
+          AND (
+              pages.ocrStatus = 'FAILED'
+              OR (
+                  ocr_results.recognizedText IS NOT NULL
+                  AND length(trim(ocr_results.recognizedText, char(9) || char(10) || char(13) || ' ')) < 150
+              )
+              OR (pages.ocrStatus = 'DONE' AND ocr_results.recognizedText IS NULL)
+          )
+        """,
+    )
+    fun observeCountPagesNeedingReprocessing(documentId: String): Flow<Int>
+
     @Transaction
     suspend fun replaceDocumentPages(documentId: String, pages: List<PageEntity>) {
         deletePagesForDocument(documentId)

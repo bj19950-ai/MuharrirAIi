@@ -254,10 +254,32 @@ class MuharrirRepository(
         registry.getAdapter(engineType).checkAvailability()
     }
 
+    suspend fun getPagesNeedingReprocessing(documentId: String): List<PageEntity> =
+        withContext(Dispatchers.IO) {
+            pageDao.getPagesNeedingReprocessing(documentId)
+        }
+
+    fun observeCountPagesNeedingReprocessing(documentId: String): Flow<Int> =
+        pageDao.observeCountPagesNeedingReprocessing(documentId)
+
+    suspend fun reprocessFailedPages(
+        context: Context,
+        documentId: String,
+        engineType: OcrEngineType,
+        onProgress: suspend (OcrExecutionProgress) -> Unit = {},
+    ): OcrRunOutcome = runDocumentOcr(
+        context = context,
+        documentId = documentId,
+        engineType = engineType,
+        reprocessFailedAndShortOnly = true,
+        onProgress = onProgress,
+    )
+
     /**
      * Executes bounded, resumable on-device OCR across document pages.
-     * - Normal run/resume processes only PENDING (or reset RUNNING) pages, skipping DONE pages.
-     * - When [retryFailedOnly] is true, retries only FAILED pages without overwriting DONE pages.
+     * - Normal run/resume processes only PENDING (or reset RUNNING) pages within [startPage]..[endPage], skipping DONE pages.
+     * - When [retryFailedOnly] is true, retries only FAILED pages within [startPage]..[endPage] without overwriting DONE pages.
+     * - When [reprocessFailedAndShortOnly] is true, reprocesses ONLY pages that failed or returned < 150 chars.
      * - When [singlePageId] is non-null, processes only that specific page.
      */
     suspend fun runDocumentOcr(
@@ -266,6 +288,9 @@ class MuharrirRepository(
         engineType: OcrEngineType,
         retryFailedOnly: Boolean = false,
         singlePageId: String? = null,
+        startPage: Int = 1,
+        endPage: Int = Int.MAX_VALUE,
+        reprocessFailedAndShortOnly: Boolean = false,
         onProgress: suspend (OcrExecutionProgress) -> Unit = {},
     ): OcrRunOutcome = withContext(Dispatchers.IO) {
         val doc = documentDao.getDocumentById(documentId)
@@ -291,11 +316,18 @@ class MuharrirRepository(
             return@withContext OcrRunOutcome.Failure("لا توجد صفحات مفهرسة لهذا المستند.")
         }
 
+        val effectiveStartPage = startPage.coerceAtLeast(1)
+        val effectiveEndPage = endPage.coerceAtLeast(effectiveStartPage)
         val targetPages = when {
             singlePageId != null -> allPages.filter { it.pageId == singlePageId }
-            retryFailedOnly -> allPages.filter { it.ocrStatus == OcrPageStatus.FAILED.name }
+            reprocessFailedAndShortOnly -> pageDao.getPagesNeedingReprocessing(documentId)
+            retryFailedOnly -> allPages.filter {
+                it.ocrStatus == OcrPageStatus.FAILED.name &&
+                    it.originalPageNumber in effectiveStartPage..effectiveEndPage
+            }
             else -> allPages.filter {
-                it.ocrStatus == OcrPageStatus.PENDING.name || it.ocrStatus == OcrPageStatus.RUNNING.name
+                it.originalPageNumber in effectiveStartPage..effectiveEndPage &&
+                    (it.ocrStatus == OcrPageStatus.PENDING.name || it.ocrStatus == OcrPageStatus.RUNNING.name)
             }
         }
 
