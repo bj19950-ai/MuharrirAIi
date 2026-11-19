@@ -20,9 +20,9 @@ import javax.xml.parsers.DocumentBuilderFactory
 class OcrTextCleanerTest {
 
     @Test
-    fun `cleanPageText removes noisy headers footers dates serials watermarks and merges broken lines`() {
+    fun `cleanPageText removes exact noise headers dates serials watermarks while retaining edge content and merging broken lines`() {
         val noisySample = """
-            جامعة سيدي محمد بن عبد الله - كلية العلوم القانونية
+            جامعة سيدي محمد بن عبد الله - كلية العلوم القانونية:
             2025-4-18   1:53
             Espace Juridique
             
@@ -50,7 +50,7 @@ class OcrTextCleanerTest {
         val cleaned = OcrTextCleaner.cleanPageText(noisySample, pageNumber = 1)
         val lines = cleaned.split("\n")
 
-        // Verify all header/footer/watermark/serial noise lines are removed
+        // Exact metadata lines are removed
         assertFalse(cleaned.contains("الصفحة1"))
         assertFalse(cleaned.contains("عسوتل0"))
         assertFalse(cleaned.contains("1150326"))
@@ -58,10 +58,13 @@ class OcrTextCleanerTest {
         assertFalse(cleaned.contains("2025-4"))
         assertFalse(cleaned.contains("1:53"))
         assertFalse(cleaned.contains("Espace Juridique", ignoreCase = true))
-        assertFalse(cleaned.contains("جامعة سيدي محمد"))
         assertFalse(cleaned.contains("اال"))
 
+        // Top-edge real text is retained cleanly
+        assertTrue(cleaned.contains("جامعة سيدي محمد بن عبد الله - كلية العلوم القانونية:"))
+
         val expectedLines = listOf(
+            "جامعة سيدي محمد بن عبد الله - كلية العلوم القانونية:",
             "يعد العقد توافق إرادتين على إنشاء الالتزام القانوني بين الأطراف المتعاقدة.",
             "فما هي شروط صحة التفاق القانوني؟",
             "وتنطبق قواعد الحق المدني في الحالات التالية:",
@@ -72,6 +75,38 @@ class OcrTextCleanerTest {
             "ويمتد أثر العقد للالتزام بتنفيذه بحسن نية خلال المدة المتفق عليها\"",
         )
         assertEquals(expectedLines, lines)
+    }
+
+    @Test
+    fun `cleanPageText retains paragraphs near top and bottom edges of page`() {
+        val edgeSample = """
+            الفصل الأول في النظرية العامة للالتزامات والعقود المدنية
+            والتجارية المعاصرة.
+            جامعة القاضي عياض بمراكش تفتح شعبة الدراسات القانونية.
+            المادة 12 من القانون المدني تنص على وجوب احترام العقد.
+        """.trimIndent()
+
+        val cleaned = OcrTextCleaner.cleanPageText(edgeSample, pageNumber = 1)
+        assertTrue(cleaned.contains("الفصل الأول في النظرية العامة للالتزامات والعقود المدنية والتجارية المعاصرة."))
+        assertTrue(cleaned.contains("جامعة القاضي عياض بمراكش تفتح شعبة الدراسات القانونية."))
+        assertTrue(cleaned.contains("المادة 12 من القانون المدني تنص على وجوب احترام العقد."))
+    }
+
+    @Test
+    fun `cleanPageText strips only metadata from mixed lines and retains surrounding text`() {
+        val mixedSample = """
+            2025-4 النظرية العامة للالتزام
+            Espace Juridique أركان العقد الصحيح 1:53
+            صفحة 4
+            3
+        """.trimIndent()
+
+        val cleaned = OcrTextCleaner.cleanPageText(mixedSample, pageNumber = 3)
+        assertFalse(cleaned.contains("2025-4"))
+        assertFalse(cleaned.contains("1:53"))
+        assertFalse(cleaned.contains("Espace Juridique", ignoreCase = true))
+        assertFalse(cleaned.contains("صفحة 4"))
+        assertEquals("النظرية العامة للالتزام أركان العقد الصحيح", cleaned)
     }
 
     @Test
@@ -208,6 +243,71 @@ class OcrTextCleanerTest {
                 // 14pt = 28 half-points, 16pt = 32 half-points
                 assertTrue("Expected 14pt (w:val=\"28\") for academic body text", bodyParaXml.contains("w:val=\"28\""))
                 assertTrue("Expected 16pt (w:val=\"32\") for academic heading", bodyParaXml.contains("w:val=\"32\""))
+                assertFalse(bodyParaXml.contains(WordTextAssembler.TEXT_LOSS_WARNING_MESSAGE))
+            }
+        } finally {
+            tempOut.delete()
+        }
+    }
+
+    @Test
+    fun `word text assembler retains surrounding page text even when review items cover most of page`() {
+        val doc = ExportDocumentModel("doc-full", "مقارن.pdf", reviewApprovedAt = 1700000000000L)
+        val pageText = "مقدمة: العقد شريعة المتعاقدين ويجب تنفيذه بحسن نية كاملة."
+        val pages = listOf(DocumentPageModel("p1", "doc-full", pageNumber = 1, ocrText = pageText))
+        val items = listOf(
+            ReviewItemModel(
+                id = 1L,
+                documentId = "doc-full",
+                pageNumber = 1,
+                category = DiscrepancyCategory.B,
+                ocrText = "العقد شريعة المتعاقدين ويجب تنفيذه بحسن",
+                suggestedText = "العقد شريعة المتعاقدين ويلتزم بتنفيذه بحسن",
+                ocrConfidence = 0.85f,
+                geminiConfidence = 0.95f,
+                evidence = "دقة الصياغة",
+                bbox = null,
+                reviewStatus = ReviewStatus.APPROVED_GEMINI,
+                userText = "العقد شريعة المتعاقدين ويلتزم بتنفيذه بحسن",
+                resolvedAt = 2000L,
+                orderIndex = 0,
+            ),
+        )
+
+        val plan = WordTextAssembler.buildPlan(doc, pages, items, WordExportMode.ACADEMIC)
+        val combined = plan.pages.single().segments.joinToString("") { it.text }
+        assertTrue(combined.contains("مقدمة:"))
+        assertTrue(combined.contains("العقد شريعة المتعاقدين ويلتزم بتنفيذه بحسن"))
+        assertTrue(combined.contains("نية كاملة."))
+    }
+
+    @Test
+    fun `word generator writes red warning note when cleaned text drops below 80 percent of raw OCR`() {
+        val generator = WordGenerator()
+        val doc = ExportDocumentModel("doc-loss", "تحذير_فقد.pdf", reviewApprovedAt = 1700000000000L)
+        val pages = listOf(
+            DocumentPageModel(
+                id = "p1",
+                documentId = "doc-loss",
+                pageNumber = 1,
+                ocrText = """
+                    Espace Juridique
+                    2025-4 1:53
+                    1150326 301101006
+                    عسوتل0
+                    النص القصير المتبقي.
+                """.trimIndent(),
+            ),
+        )
+
+        val tempOut = kotlin.io.path.createTempFile("m10_loss_warning_", ".docx").toFile()
+        try {
+            generator.generate(doc, pages, emptyList(), WordExportMode.MATCH_ORIGINAL, tempOut)
+            ZipFile(tempOut).use { zip ->
+                val xmlString = zip.getInputStream(zip.getEntry("word/document.xml")).readBytes().toString(Charsets.UTF_8)
+                assertTrue(xmlString.contains(WordTextAssembler.TEXT_LOSS_WARNING_MESSAGE))
+                assertTrue(xmlString.contains(WordGenerator.UNRESOLVED_TEXT_RED_HEX))
+                assertTrue(xmlString.contains("النص القصير المتبقي."))
             }
         } finally {
             tempOut.delete()

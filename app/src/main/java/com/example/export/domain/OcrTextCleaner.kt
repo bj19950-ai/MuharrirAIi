@@ -1,20 +1,20 @@
 package com.example.export.domain
 
 /**
- * Module 09 — Text Reconstruction & Formatting Cleanup.
+ * Module 09 / 10 — Safe Text Reconstruction & Formatting Cleanup.
  *
- * Cleans raw per-page OCR output before Word (.docx) assembly/export:
- * 1. Removes typical PDF header/footer noise (page counters, timestamps, serials, watermarks, university headers).
- * 2. Fixes common Arabic OCR ligature errors ("اال" -> "ال", "لال" -> "لل") and attaches isolated punctuation.
- * 3. Reconstructs full paragraphs by merging visually broken lines while preserving sentence endings and bullets.
- * 4. Removes empty lines and collapses excessive whitespace.
+ * Cleans raw per-page OCR output before Word (.docx) assembly/export without dropping real text:
+ * 1. Deletes a line ONLY when it is an exact match for a standalone page number, date/time, serial, or watermark.
+ * 2. Strips inline metadata tokens (dates, times, watermarks, serials) from mixed lines while retaining all real text.
+ * 3. Fixes common Arabic OCR ligature errors ("اال" -> "ال", "لال" -> "لل") and attaches isolated punctuation.
+ * 4. Reconstructs full paragraphs by merging visually broken lines while preserving sentence endings and bullets.
  */
 class OcrTextCleaner {
 
     fun cleanPageText(rawText: String, pageNumber: Int): String {
         if (rawText.isBlank()) return ""
 
-        // Step 1: Split into trimmed lines, collapse horizontal spaces, drop blank lines & noise headers/footers.
+        // Step 1: Split into trimmed lines, collapse horizontal spaces, strip exact/inline metadata without dropping text.
         val rawLines = rawText
             .split(LINE_SPLIT_REGEX)
             .map { collapseHorizontalSpaces(it) }
@@ -22,36 +22,33 @@ class OcrTextCleaner {
 
         if (rawLines.isEmpty()) return ""
 
-        val filteredLines = rawLines.filterIndexed { index, line ->
-            !isHeaderOrFooterNoise(
-                line = line,
-                lineIndex = index,
-                totalLines = rawLines.size,
-                pageNumber = pageNumber,
-            )
+        val cleanedLines = rawLines.mapNotNull { line ->
+            stripMetadataIfSafe(line, pageNumber)
         }
 
-        if (filteredLines.isEmpty()) return ""
+        if (cleanedLines.isEmpty()) return ""
 
         // Step 2: Fix Arabic OCR ligature errors and attach isolated punctuation marks to the previous line.
         val normalizedLines = mutableListOf<String>()
-        for (line in filteredLines) {
-            val cleanedLine = cleanArabicText(line)
-            if (cleanedLine.isEmpty()) continue
+        for (line in cleanedLines) {
+            val fixedLine = cleanArabicText(line)
+            if (fixedLine.isEmpty()) continue
 
-            if (ISOLATED_PUNCTUATION_REGEX.matches(cleanedLine)) {
+            if (ISOLATED_PUNCTUATION_REGEX.matches(fixedLine)) {
                 if (normalizedLines.isNotEmpty()) {
                     val lastIdx = normalizedLines.lastIndex
-                    normalizedLines[lastIdx] = normalizedLines[lastIdx] + cleanedLine
+                    normalizedLines[lastIdx] = normalizedLines[lastIdx] + fixedLine
+                } else {
+                    normalizedLines.add(fixedLine)
                 }
             } else {
-                normalizedLines.add(cleanedLine)
+                normalizedLines.add(fixedLine)
             }
         }
 
         if (normalizedLines.isEmpty()) return ""
 
-        // Step 3: Merge visually broken lines into proper paragraphs.
+        // Step 3: Merge visually broken lines into proper paragraphs without ever dropping a line.
         val paragraphs = mutableListOf<String>()
         val currentParagraph = StringBuilder()
 
@@ -102,42 +99,30 @@ class OcrTextCleaner {
         return collapseHorizontalSpaces(result)
     }
 
-    private fun isHeaderOrFooterNoise(
+    private fun stripMetadataIfSafe(
         line: String,
-        lineIndex: Int,
-        totalLines: Int,
         pageNumber: Int,
-    ): Boolean {
-        val isNearEdge = lineIndex <= EDGE_WINDOW_LINES || lineIndex >= (totalLines - 1 - EDGE_WINDOW_LINES)
+    ): String? {
+        val trimmed = line.trim()
+        if (trimmed.isEmpty()) return null
 
-        // Contains "الصفحة" followed by a number (e.g. "الصفحة1", "الصفحة 1", "الصفحة ١٢")
-        if (PAGE_WORD_WITH_NUMBER_REGEX.containsMatchIn(line)) return true
+        // Delete ONLY when the entire line is an exact page-number marker.
+        if (EXACT_PAGE_WORD_WITH_NUMBER_REGEX.matches(trimmed)) return null
+        if (EXACT_STANDALONE_NUMBER_REGEX.matches(trimmed)) return null
+        val normalizedEdgeDigits = normalizeDigits(trimmed.trim(' ', '-', '–', '—', '[', ']', '(', ')', '/'))
+        if (normalizedEdgeDigits == pageNumber.toString()) return null
 
-        // Short page marker like "صفحة 3" or "ص 3"
-        if (SHORT_PAGE_MARKER_REGEX.matches(line)) return true
+        // On mixed or pure-metadata lines, strip only the metadata tokens and retain all surrounding text.
+        var stripped = trimmed
+        stripped = INLINE_PAGE_WORD_WITH_NUMBER_REGEX.replace(stripped, " ")
+        stripped = DATE_PATTERN_REGEX.replace(stripped, " ")
+        stripped = TIME_PATTERN_REGEX.replace(stripped, " ")
+        stripped = WATERMARK_TEXT_REGEX.replace(stripped, " ")
+        stripped = GARBLED_FOOTER_NOISE_REGEX.replace(stripped, " ")
+        stripped = SERIAL_NUMBER_REGEX.replace(stripped, " ")
 
-        // Standalone page number matching current pageNumber or short isolated numeral at top/bottom
-        if (isNearEdge && STANDALONE_PAGE_NUMBER_REGEX.matches(line)) return true
-        val trimmedDigits = normalizeDigits(line.trim(' ', '-', '–', '—', '[', ']', '(', ')', '/'))
-        if (trimmedDigits == pageNumber.toString()) return true
-
-        // Contains dates like "2025-4", "2025/04/19", or times like "1:53"
-        if (DATE_PATTERN_REGEX.containsMatchIn(line)) return true
-        if (TIME_PATTERN_REGEX.containsMatchIn(line)) return true
-
-        // Contains "Espace Juridique" watermark/header
-        if (line.contains("espace juridique", ignoreCase = true)) return true
-
-        // Contains random serial numbers (e.g., "1150326", "301101006")
-        if (SERIAL_NUMBER_REGEX.containsMatchIn(line)) return true
-
-        // Known garbled Arabic OCR header/footer artifacts (e.g., "عسوتل0")
-        if (GARBLED_FOOTER_NOISE_REGEX.containsMatchIn(line)) return true
-
-        // Repeated university names, faculties, or course metadata at the very top or bottom of a page
-        if (isNearEdge && UNIVERSITY_OR_COURSE_HEADER_REGEX.containsMatchIn(line)) return true
-
-        return false
+        val collapsed = collapseHorizontalSpaces(stripped)
+        return collapsed.ifEmpty { null }
     }
 
     private fun isBulletLine(line: String): Boolean {
@@ -166,28 +151,21 @@ class OcrTextCleaner {
     }
 
     companion object {
-        private const val EDGE_WINDOW_LINES = 2
         private val LINE_SPLIT_REGEX = Regex("\\r?\\n")
         private val HORIZONTAL_SPACES_REGEX = Regex("[ \\t\\u00A0]+")
         private val ISOLATED_PUNCTUATION_REGEX = Regex("^[.,،؛:؟!\"'»«()…]+$")
         private val WORD_START_LAM_ALEF_LAM_REGEX = Regex("(^|[\\s«\"(وف])لال(?!ل)")
 
-        private val PAGE_WORD_WITH_NUMBER_REGEX = Regex("الصفحة\\s*[:\\-/\\.]?\\s*[0-9٠-٩]+")
-        private val SHORT_PAGE_MARKER_REGEX = Regex("^(?:صفحة|ص)\\s*[:\\-/\\.]?\\s*[0-9٠-٩]+(?:\\s*(?:من|/)\\s*[0-9٠-٩]+)?$")
-        private val STANDALONE_PAGE_NUMBER_REGEX = Regex("^[-–—\\[\\]()\\s]*[0-9٠-٩]{1,4}[-–—\\[\\]()\\s]*$")
+        private val EXACT_PAGE_WORD_WITH_NUMBER_REGEX = Regex(
+            "^(?:الصفحة|صفحة|ص)\\s*[:\\-/\\.]?\\s*[0-9٠-٩]+(?:\\s*(?:من|/)\\s*[0-9٠-٩]+)?$",
+        )
+        private val EXACT_STANDALONE_NUMBER_REGEX = Regex("^[-–—\\[\\]()\\s]*[0-9٠-٩]{1,4}[-–—\\[\\]()\\s]*$")
+        private val INLINE_PAGE_WORD_WITH_NUMBER_REGEX = Regex("الصفحة\\s*[:\\-/\\.]?\\s*[0-9٠-٩]+")
         private val DATE_PATTERN_REGEX = Regex("\\b\\d{4}[-/]\\d{1,2}(?:[-/]\\d{1,2})?\\b|\\b\\d{1,2}[-/]\\d{1,2}[-/]\\d{2,4}\\b")
         private val TIME_PATTERN_REGEX = Regex("\\b\\d{1,2}:\\d{2}(?::\\d{2})?(?:\\s*(?:AM|PM|am|pm|ص|م))?\\b")
+        private val WATERMARK_TEXT_REGEX = Regex("Espace\\s+Juridique", RegexOption.IGNORE_CASE)
         private val SERIAL_NUMBER_REGEX = Regex("\\b[0-9٠-٩]{6,}\\b")
         private val GARBLED_FOOTER_NOISE_REGEX = Regex("عسوتل\\s*[0-9٠-٩]*")
-        private val UNIVERSITY_OR_COURSE_HEADER_REGEX = Regex(
-            "(?:جامعة\\s+[\\u0621-\\u064A]+|" +
-                "كلية\\s+(?:الحقوق|العلوم\\s+القانونية|الشريعة|الآداب|الاقتصاد)|" +
-                "الموسم\\s+الجامعي|السنة\\s+الجامعية|" +
-                "السداسي\\s+(?:الأول|الثاني|الثالث|الرابع|الخامس|السادس)|" +
-                "مسلك\\s+القانون|شعبة\\s+القانون|" +
-                "محاضرات\\s+(?:في|مادة)|" +
-                "^(?:الأستاذ|ذ\\.|وحدة|مادة)\\s*:)",
-        )
 
         private val SENTENCE_END_PUNCTUATION = setOf('.', '؟', '!', ':', '"', ')')
         private val BULLET_CHARS = setOf('-', '•', '✓', '❖')

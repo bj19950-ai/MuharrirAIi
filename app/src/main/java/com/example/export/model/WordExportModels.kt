@@ -49,6 +49,7 @@ data class WordPageSection(
     val pageNumber: Int,
     val segments: List<WordTextSegment>,
     val paragraphs: List<List<WordTextSegment>> = segments.map { listOf(it) },
+    val textLossWarning: String? = null,
 )
 
 data class WordDocumentPlan(

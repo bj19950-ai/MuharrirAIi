@@ -86,6 +86,9 @@ class WordGenerator(
 
     private fun writeMatchOriginalMode(xwpfDocument: XWPFDocument, plan: WordDocumentPlan) {
         plan.pages.forEachIndexed { pageIdx, page ->
+            page.textLossWarning?.let { warning ->
+                writeWarningParagraph(xwpfDocument, warning)
+            }
             if (page.paragraphs.isEmpty()) {
                 val emptyParagraph = createRtlParagraph(xwpfDocument)
                 createStyledRun(
@@ -144,10 +147,32 @@ class WordGenerator(
                 isUnresolvedHighlight = false,
             )
 
+            page.textLossWarning?.let { warning ->
+                writeWarningParagraph(xwpfDocument, warning)
+            }
+
             page.paragraphs.forEach { runs ->
                 writeAcademicSegmentParagraph(xwpfDocument, runs)
             }
         }
+    }
+
+    private fun writeWarningParagraph(
+        xwpfDocument: XWPFDocument,
+        warningText: String,
+    ) {
+        val warningParagraph = createRtlParagraph(xwpfDocument).apply {
+            spacingBefore = 60
+            spacingAfter = 100
+        }
+        createStyledRun(
+            paragraph = warningParagraph,
+            text = warningText,
+            fontSize = 12,
+            isBold = true,
+            isUnresolvedHighlight = false,
+            textColorHex = UNRESOLVED_TEXT_RED_HEX,
+        )
     }
 
     private fun writeAcademicSegmentParagraph(
@@ -202,6 +227,7 @@ class WordGenerator(
         fontSize: Int,
         isBold: Boolean,
         isUnresolvedHighlight: Boolean,
+        textColorHex: String? = null,
     ): XWPFRun {
         val run = paragraph.createRun()
         run.fontSize = fontSize
@@ -219,6 +245,8 @@ class WordGenerator(
                 attrName = "val",
                 attrValue = "yellow",
             )
+        } else if (textColorHex != null) {
+            run.color = textColorHex
         }
         appendWmlElement(rPr, "rtl")
         appendRunTextElement(run, text)

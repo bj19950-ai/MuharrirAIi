@@ -63,10 +63,22 @@ object WordTextAssembler {
                 }
             }
 
+            val rawNonWhitespaceCount = page.ocrText.count { !it.isWhitespace() }
+            val cleanedNonWhitespaceCount = cleanedPageOcr.count { !it.isWhitespace() }
+            val textLossWarning = if (
+                rawNonWhitespaceCount > 0 &&
+                cleanedNonWhitespaceCount < (rawNonWhitespaceCount * TEXT_LOSS_WARNING_RATIO)
+            ) {
+                TEXT_LOSS_WARNING_MESSAGE
+            } else {
+                null
+            }
+
             WordPageSection(
                 pageNumber = page.pageNumber,
                 segments = segments,
                 paragraphs = paragraphs,
+                textLossWarning = textLossWarning,
             )
         }
 
@@ -83,11 +95,10 @@ object WordTextAssembler {
     ): Boolean {
         val trimmedOcr = cleanedOcrText.trim()
         if (trimmedOcr.isEmpty()) return false
-        val itemsOcrLength = pageItems.sumOf { it.ocrText.trim().length }.coerceAtLeast(1)
         val hasDirectMatch = pageItems.any { item ->
             candidateNeedles(item).any { needle -> trimmedOcr.contains(needle) }
         }
-        return hasDirectMatch && trimmedOcr.length > (itemsOcrLength * 1.4f)
+        return hasDirectMatch || trimmedOcr.length >= MIN_FULL_PAGE_OCR_LENGTH
     }
 
     private fun spliceItemsIntoFullPageOcr(
@@ -196,10 +207,12 @@ object WordTextAssembler {
 
     private fun candidateNeedles(item: ReviewItemModel): List<String> {
         val rawNeedle = item.ocrText.trim()
-        val cleanedNeedle = OcrTextCleaner.cleanArabicText(rawNeedle)
+        val singleLineNeedle = rawNeedle.replace(WHITESPACE_REGEX, " ").trim()
+        val cleanedNeedle = OcrTextCleaner.cleanArabicText(singleLineNeedle)
         return buildList {
             if (rawNeedle.isNotEmpty()) add(rawNeedle)
-            if (cleanedNeedle.isNotEmpty() && cleanedNeedle != rawNeedle) add(cleanedNeedle)
+            if (singleLineNeedle.isNotEmpty() && singleLineNeedle !in this) add(singleLineNeedle)
+            if (cleanedNeedle.isNotEmpty() && cleanedNeedle !in this) add(cleanedNeedle)
         }
     }
 
@@ -281,4 +294,10 @@ object WordTextAssembler {
             }
         }
     }
+
+    private const val TEXT_LOSS_WARNING_RATIO = 0.80
+    private const val MIN_FULL_PAGE_OCR_LENGTH = 40
+    private val WHITESPACE_REGEX = Regex("\\s+")
+    const val TEXT_LOSS_WARNING_MESSAGE =
+        "تحذير: تم حذف جزء كبير من النص في هذه الصفحة أثناء التنظيف، يرجى مراجعتها"
 }
