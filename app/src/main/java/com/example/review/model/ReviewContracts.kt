@@ -47,6 +47,7 @@ data class ReviewStatusCounts(
     val approvedGemini: Int = 0,
     val manuallyEdited: Int = 0,
     val unresolved: Int = 0,
+    val ignored: Int = 0,
     val remaining: Int = 0,
 )
 

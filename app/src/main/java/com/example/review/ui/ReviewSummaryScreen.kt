@@ -275,6 +275,12 @@ fun ReviewSummaryScreen(
                                 tint = ext.warning,
                             )
                             SummaryStatRow(
+                                label = "مستبعد (محذوف من المستند)",
+                                count = uiState.stats.ignored,
+                                icon = Icons.Default.ErrorOutline,
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            SummaryStatRow(
                                 label = "متبقٍ قيد الانتظار / يتطلب إعادة مراجعة",
                                 count = uiState.stats.remaining,
                                 icon = Icons.Default.HourglassEmpty,

@@ -40,18 +40,19 @@ object WordTextAssembler {
 
         val sections = sortedPages.map { page ->
             val pageItems = itemsByPage[page.pageNumber].orEmpty()
+            val cleanedPageOcr = OcrTextCleaner.cleanPageText(page.ocrText, page.pageNumber)
             val paragraphs: List<List<WordTextSegment>>
             val segments: List<WordTextSegment>
 
             when {
                 pageItems.isEmpty() -> {
-                    val rawSegments = buildSegmentsFromRawPageOcr(page.ocrText)
+                    val rawSegments = buildSegmentsFromRawPageOcr(cleanedPageOcr)
                     segments = rawSegments
                     paragraphs = rawSegments.map { listOf(it) }
                 }
 
-                shouldSpliceIntoFullPageOcr(page.ocrText, pageItems) -> {
-                    paragraphs = spliceItemsIntoFullPageOcr(page.ocrText, pageItems, highlightUnresolved)
+                shouldSpliceIntoFullPageOcr(cleanedPageOcr, pageItems) -> {
+                    paragraphs = spliceItemsIntoFullPageOcr(cleanedPageOcr, pageItems, highlightUnresolved)
                     segments = paragraphs.flatten()
                 }
 
@@ -77,78 +78,105 @@ object WordTextAssembler {
     }
 
     private fun shouldSpliceIntoFullPageOcr(
-        rawOcrText: String,
+        cleanedOcrText: String,
         pageItems: List<ReviewItemModel>,
     ): Boolean {
-        val trimmedOcr = rawOcrText.trim()
+        val trimmedOcr = cleanedOcrText.trim()
         if (trimmedOcr.isEmpty()) return false
         val itemsOcrLength = pageItems.sumOf { it.ocrText.trim().length }.coerceAtLeast(1)
         val hasDirectMatch = pageItems.any { item ->
-            val needle = item.ocrText.trim()
-            needle.isNotEmpty() && trimmedOcr.contains(needle)
+            candidateNeedles(item).any { needle -> trimmedOcr.contains(needle) }
         }
         return hasDirectMatch && trimmedOcr.length > (itemsOcrLength * 1.4f)
     }
 
     private fun spliceItemsIntoFullPageOcr(
-        rawOcrText: String,
+        cleanedOcrText: String,
         pageItems: List<ReviewItemModel>,
         highlightUnresolved: Boolean,
     ): List<List<WordTextSegment>> {
         val remainingItems = pageItems.toMutableList()
-        val lines = rawOcrText
+        val paragraphsText = cleanedOcrText
             .split(Regex("\\r?\\n"))
             .map { it.trim() }
             .filter { it.isNotEmpty() }
 
         val resultParagraphs = mutableListOf<List<WordTextSegment>>()
 
-        for (line in lines) {
+        for (paragraphLine in paragraphsText) {
             val lineSegments = mutableListOf<WordTextSegment>()
             var cursor = 0
 
-            while (cursor < line.length && remainingItems.isNotEmpty()) {
+            while (cursor < paragraphLine.length && remainingItems.isNotEmpty()) {
                 var earliestMatchPos = Int.MAX_VALUE
                 var matchedItemIndex = -1
+                var matchedNeedleLength = 0
 
                 for (idx in remainingItems.indices) {
-                    val needle = remainingItems[idx].ocrText.trim()
-                    if (needle.isEmpty()) continue
-                    val pos = line.indexOf(needle, startIndex = cursor)
-                    if (pos >= 0 && pos < earliestMatchPos) {
-                        earliestMatchPos = pos
-                        matchedItemIndex = idx
+                    for (needle in candidateNeedles(remainingItems[idx])) {
+                        val pos = paragraphLine.indexOf(needle, startIndex = cursor)
+                        if (pos >= 0 && pos < earliestMatchPos) {
+                            earliestMatchPos = pos
+                            matchedItemIndex = idx
+                            matchedNeedleLength = needle.length
+                        }
                     }
                 }
 
                 if (matchedItemIndex < 0) break
 
                 val item = remainingItems.removeAt(matchedItemIndex)
-                val needle = item.ocrText.trim()
 
                 if (earliestMatchPos > cursor) {
-                    lineSegments.add(
-                        WordTextSegment(
-                            text = line.substring(cursor, earliestMatchPos),
-                            isUnresolvedHighlight = false,
-                        ),
+                    val prefix = OcrTextCleaner.cleanArabicText(
+                        paragraphLine.substring(cursor, earliestMatchPos),
                     )
+                    val leadingSpace = if (paragraphLine[cursor].isWhitespace() && !prefix.startsWith(" ")) " " else ""
+                    val trailingSpace = if (
+                        earliestMatchPos > cursor &&
+                        paragraphLine[earliestMatchPos - 1].isWhitespace() &&
+                        prefix.isNotEmpty() &&
+                        !prefix.endsWith(" ")
+                    ) {
+                        " "
+                    } else {
+                        ""
+                    }
+                    val formattedPrefix = if (prefix.isEmpty()) {
+                        if (paragraphLine.substring(cursor, earliestMatchPos).isNotEmpty()) " " else ""
+                    } else {
+                        "$leadingSpace$prefix$trailingSpace"
+                    }
+                    if (formattedPrefix.isNotEmpty()) {
+                        lineSegments.add(
+                            WordTextSegment(
+                                text = formattedPrefix,
+                                isUnresolvedHighlight = false,
+                            ),
+                        )
+                    }
                 }
 
                 resolveItemSegment(item, highlightUnresolved)?.let { resolved ->
                     lineSegments.add(resolved)
                 }
 
-                cursor = earliestMatchPos + needle.length
+                cursor = earliestMatchPos + matchedNeedleLength
             }
 
-            if (cursor < line.length) {
-                lineSegments.add(
-                    WordTextSegment(
-                        text = line.substring(cursor),
-                        isUnresolvedHighlight = false,
-                    ),
-                )
+            if (cursor < paragraphLine.length) {
+                val rawSuffix = paragraphLine.substring(cursor)
+                val cleanedSuffix = OcrTextCleaner.cleanArabicText(rawSuffix)
+                val leadingSpace = if (rawSuffix.firstOrNull()?.isWhitespace() == true && cleanedSuffix.isNotEmpty()) " " else ""
+                val formattedSuffix = "$leadingSpace$cleanedSuffix"
+                if (formattedSuffix.isNotEmpty()) {
+                    lineSegments.add(
+                        WordTextSegment(
+                            text = formattedSuffix,
+                            isUnresolvedHighlight = false,
+                        ),
+                    )
+                }
             }
 
             if (lineSegments.isNotEmpty()) {
@@ -156,7 +184,7 @@ object WordTextAssembler {
             }
         }
 
-        // Preserve any item whose ocrText was not matched verbatim in full OCR lines
+        // Preserve any item whose ocrText was not matched verbatim in cleaned OCR paragraphs
         remainingItems.forEach { leftover ->
             resolveItemSegment(leftover, highlightUnresolved)?.let { seg ->
                 resultParagraphs.add(listOf(seg))
@@ -166,15 +194,24 @@ object WordTextAssembler {
         return resultParagraphs
     }
 
-    private fun buildSegmentsFromRawPageOcr(rawOcrText: String): List<WordTextSegment> {
-        if (rawOcrText.isBlank()) return emptyList()
-        return rawOcrText
+    private fun candidateNeedles(item: ReviewItemModel): List<String> {
+        val rawNeedle = item.ocrText.trim()
+        val cleanedNeedle = OcrTextCleaner.cleanArabicText(rawNeedle)
+        return buildList {
+            if (rawNeedle.isNotEmpty()) add(rawNeedle)
+            if (cleanedNeedle.isNotEmpty() && cleanedNeedle != rawNeedle) add(cleanedNeedle)
+        }
+    }
+
+    private fun buildSegmentsFromRawPageOcr(cleanedOcrText: String): List<WordTextSegment> {
+        if (cleanedOcrText.isBlank()) return emptyList()
+        return cleanedOcrText
             .split(Regex("\\r?\\n"))
-            .map { it.trim() }
+            .map { OcrTextCleaner.cleanArabicText(it) }
             .filter { it.isNotEmpty() }
-            .map { line ->
+            .map { paragraph ->
                 WordTextSegment(
-                    text = line,
+                    text = paragraph,
                     isUnresolvedHighlight = false,
                 )
             }
@@ -185,11 +222,15 @@ object WordTextAssembler {
         highlightUnresolved: Boolean,
     ): WordTextSegment? {
         return when {
+            item.reviewStatus == ReviewStatus.IGNORED -> null
+
             item.isStale ||
                 item.reviewStatus == ReviewStatus.UNRESOLVED ||
                 item.reviewStatus == ReviewStatus.PENDING ||
                 item.reviewStatus == ReviewStatus.STALE -> {
-                val unresolvedText = item.ocrText.ifBlank { item.suggestedText.orEmpty() }.trim()
+                val unresolvedText = OcrTextCleaner.cleanArabicText(
+                    item.ocrText.ifBlank { item.suggestedText.orEmpty() },
+                )
                 if (unresolvedText.isEmpty()) {
                     null
                 } else {
@@ -205,19 +246,21 @@ object WordTextAssembler {
                 val approvedText = item.userText?.takeIf { it.isNotBlank() }
                     ?: item.suggestedText?.takeIf { it.isNotBlank() }
                     ?: item.ocrText
-                val trimmed = approvedText.trim()
-                if (trimmed.isEmpty()) {
+                val cleaned = OcrTextCleaner.cleanArabicText(approvedText)
+                if (cleaned.isEmpty()) {
                     null
                 } else {
                     WordTextSegment(
-                        text = trimmed,
+                        text = cleaned,
                         isUnresolvedHighlight = false,
                     )
                 }
             }
 
             item.category == DiscrepancyCategory.A -> {
-                val finalText = (item.userText?.takeIf { it.isNotBlank() } ?: item.ocrText).trim()
+                val finalText = OcrTextCleaner.cleanArabicText(
+                    item.userText?.takeIf { it.isNotBlank() } ?: item.ocrText,
+                )
                 if (finalText.isEmpty()) {
                     null
                 } else {
@@ -229,7 +272,7 @@ object WordTextAssembler {
             }
 
             else -> {
-                val fallback = item.ocrText.trim()
+                val fallback = OcrTextCleaner.cleanArabicText(item.ocrText)
                 if (fallback.isEmpty()) {
                     null
                 } else {

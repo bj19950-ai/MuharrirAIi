@@ -248,7 +248,9 @@ fun DocumentEntity.toDomain(
     val progress = ReviewProgress(
         totalItems = actionableItems.size,
         resolvedItems = actionableItems.count {
-            it.status == ReviewStatus.APPROVED_GEMINI || it.status == ReviewStatus.MANUALLY_EDITED
+            it.status == ReviewStatus.APPROVED_GEMINI ||
+                it.status == ReviewStatus.MANUALLY_EDITED ||
+                it.status == ReviewStatus.IGNORED
         },
         unresolvedItems = actionableItems.count { it.status == ReviewStatus.UNRESOLVED },
     )

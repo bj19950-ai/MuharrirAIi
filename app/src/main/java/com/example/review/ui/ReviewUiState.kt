@@ -16,6 +16,7 @@ enum class ReviewFilter(val labelAr: String) {
     DISCREPANCY_ONLY("اختلاف فقط"),
     UNRESOLVED_ONLY("غير محسوم فقط"),
     PENDING_ONLY("غير مراجع فقط"),
+    IGNORED_ONLY("المستبعدة فقط"),
 }
 
 enum class ReopenReason {
@@ -40,6 +41,7 @@ data class ReviewUiState(
     val currentIndex: Int = 0, // 0-based inside filteredItems
     val selectedFilter: ReviewFilter = ReviewFilter.ALL,
     val includeAgreementInAll: Boolean = false,
+    val ignoreMinorDifferences: Boolean = false,
     val stats: ReviewStatusCounts = ReviewStatusCounts(),
     val pageBitmap: Bitmap? = null,
     val isBitmapLoading: Boolean = false,
@@ -95,6 +97,7 @@ object ReviewArabicFormatter {
             ReviewStatus.APPROVED_GEMINI -> "تم قبول اقتراح Gemini"
             ReviewStatus.MANUALLY_EDITED -> "تم التعديل يدويًا"
             ReviewStatus.UNRESOLVED -> "غير محسوم"
+            ReviewStatus.IGNORED -> "مستبعد (محذوف من المستند)"
             ReviewStatus.STALE -> "يتطلب إعادة مراجعة"
         }
     }

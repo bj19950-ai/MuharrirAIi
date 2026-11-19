@@ -4,6 +4,7 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -35,8 +36,11 @@ import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.Assessment
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.ErrorOutline
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.HelpOutline
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.WarningAmber
@@ -67,6 +71,9 @@ import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -121,10 +128,12 @@ fun ReviewScreen(
                                 overflow = TextOverflow.Ellipsis,
                             )
                             Text(
-                                text = "المتبقي: ${uiState.stats.remaining} • الإجمالي: ${uiState.stats.total}",
+                                text = "المتبقي: ${uiState.stats.remaining} • مستبعد: ${uiState.stats.ignored} • الإجمالي: ${uiState.stats.total}",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.testTag("review_stats_bar"),
                             )
                         }
                     },
@@ -172,6 +181,7 @@ fun ReviewScreen(
                     onNext = viewModel::goToNext,
                     onSelectFilter = viewModel::selectFilter,
                     onToggleIncludeAgreement = viewModel::toggleIncludeAgreement,
+                    onToggleIgnoreMinorDifferences = viewModel::toggleIgnoreMinorDifferences,
                     onPageJumpChanged = viewModel::onPageJumpInputChanged,
                     onJumpToPage = viewModel::jumpToPage,
                 )
@@ -517,23 +527,12 @@ private fun ReviewCardPane(
 
                 // OCR Original Output
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Text(
-                            text = "قراءة OCR الأصلية",
-                            style = MaterialTheme.typography.labelLarge,
-                            fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.primary,
-                        )
-                        Text(
-                            text = "الثقة: ${ReviewArabicFormatter.formatConfidence(item.ocrConfidence)}",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
+                    Text(
+                        text = "قراءة OCR الأصلية",
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -549,25 +548,14 @@ private fun ReviewCardPane(
                     }
                 }
 
-                // Gemini Suggestion + Evidence
+                // Gemini Suggestion + Collapsible Evidence
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Text(
-                            text = "اقتراح Gemini",
-                            style = MaterialTheme.typography.labelLarge,
-                            fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.secondary,
-                        )
-                        Text(
-                            text = "الثقة: ${ReviewArabicFormatter.formatConfidence(item.geminiConfidence)}",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
+                    Text(
+                        text = "اقتراح Gemini",
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.secondary,
+                    )
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -584,12 +572,56 @@ private fun ReviewCardPane(
                     }
 
                     item.evidence?.takeIf { it.isNotBlank() }?.let { evidence ->
-                        Text(
-                            text = "الدليل: $evidence",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
+                        var isEvidenceExpanded by remember(item.id) { mutableStateOf(false) }
+                        Surface(
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(10.dp),
+                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                        ) {
+                            Column(modifier = Modifier.fillMaxWidth()) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .heightIn(min = 48.dp)
+                                        .clickable { isEvidenceExpanded = !isEvidenceExpanded }
+                                        .padding(horizontal = 12.dp, vertical = 8.dp)
+                                        .testTag("evidence_toggle_row"),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Text(
+                                        text = "السبب (اضغط للعرض)",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        fontWeight = FontWeight.Medium,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                    Icon(
+                                        imageVector = if (isEvidenceExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                                        contentDescription = if (isEvidenceExpanded) "إخفاء السبب" else "عرض السبب",
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                                AnimatedVisibility(visible = isEvidenceExpanded) {
+                                    Text(
+                                        text = evidence,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier
+                                            .padding(start = 12.dp, end = 12.dp, bottom = 12.dp)
+                                            .testTag("evidence_content_text"),
+                                    )
+                                }
+                            }
+                        }
                     }
+
+                    Text(
+                        text = "Tesseract: ${ReviewArabicFormatter.formatConfidence(item.ocrConfidence)} | Gemini: ${ReviewArabicFormatter.formatConfidence(item.geminiConfidence)}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.testTag("combined_confidence_label"),
+                    )
                 }
 
                 // Existing user decision preview (when resolved & not editing)
@@ -715,6 +747,26 @@ private fun ReviewCardPane(
                         Spacer(modifier = Modifier.width(6.dp))
                         Text("ترك دون حسم")
                     }
+
+                    OutlinedButton(
+                        onClick = viewModel::ignoreItem,
+                        enabled = !uiState.isSaving,
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            contentColor = MaterialTheme.colorScheme.error,
+                        ),
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.error),
+                        modifier = Modifier
+                            .minimumInteractiveComponentSize()
+                            .testTag("ignore_item_button"),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.DeleteOutline,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp),
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("استبعاد (حذف من المستند)")
+                    }
                 }
 
                 if (!item.isStale &&
@@ -722,6 +774,7 @@ private fun ReviewCardPane(
                         ReviewStatus.APPROVED_GEMINI,
                         ReviewStatus.MANUALLY_EDITED,
                         ReviewStatus.UNRESOLVED,
+                        ReviewStatus.IGNORED,
                     )
                 ) {
                     TextButton(
@@ -754,6 +807,7 @@ private fun ReviewBottomNavigationBar(
     onNext: () -> Unit,
     onSelectFilter: (ReviewFilter) -> Unit,
     onToggleIncludeAgreement: () -> Unit,
+    onToggleIgnoreMinorDifferences: () -> Unit,
     onPageJumpChanged: (String) -> Unit,
     onJumpToPage: () -> Unit,
 ) {
@@ -796,6 +850,14 @@ private fun ReviewBottomNavigationBar(
                         modifier = Modifier
                             .heightIn(min = 48.dp)
                             .testTag("toggle_include_agreement_chip"),
+                    )
+                    FilterChip(
+                        selected = uiState.ignoreMinorDifferences,
+                        onClick = onToggleIgnoreMinorDifferences,
+                        label = { Text("تجاهل فروقات الهمزات", style = MaterialTheme.typography.labelMedium) },
+                        modifier = Modifier
+                            .heightIn(min = 48.dp)
+                            .testTag("toggle_ignore_minor_differences_chip"),
                     )
                 }
             }

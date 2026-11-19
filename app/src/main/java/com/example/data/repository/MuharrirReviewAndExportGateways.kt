@@ -87,16 +87,18 @@ class MuharrirReviewQueueGateway(
                 val approved = counts[ReviewStatus.APPROVED_GEMINI] ?: 0
                 val edited = counts[ReviewStatus.MANUALLY_EDITED] ?: 0
                 val unresolved = counts[ReviewStatus.UNRESOLVED] ?: 0
+                val ignored = counts[ReviewStatus.IGNORED] ?: 0
                 val pending = counts[ReviewStatus.PENDING] ?: 0
                 val stale = counts[ReviewStatus.STALE] ?: 0
                 val remaining = pending + stale
-                val total = approved + edited + unresolved + remaining
+                val total = approved + edited + unresolved + ignored + remaining
 
                 ReviewStatusCounts(
                     total = total,
                     approvedGemini = approved,
                     manuallyEdited = edited,
                     unresolved = unresolved,
+                    ignored = ignored,
                     remaining = remaining,
                 )
             }

@@ -55,6 +55,7 @@ enum class ReviewStatus(val arabicLabel: String) {
     APPROVED_GEMINI("اقتراح Gemini مقبول"),
     MANUALLY_EDITED("معدّل يدوياً"),
     UNRESOLVED("غير محسوم"),
+    IGNORED("مستبعد"),
     STALE("يتطلب إعادة مراجعة (تغيّر الأصل)"),
 }
 

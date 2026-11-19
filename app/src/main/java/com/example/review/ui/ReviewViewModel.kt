@@ -75,6 +75,7 @@ class ReviewViewModel(
                         items = items,
                         filter = currentState.selectedFilter,
                         includeAgreement = currentState.includeAgreementInAll,
+                        ignoreMinorDifferences = currentState.ignoreMinorDifferences,
                     )
 
                     val preferredId = currentState.currentItem?.id
@@ -134,19 +135,32 @@ class ReviewViewModel(
         items: List<ReviewItemModel>,
         filter: ReviewFilter,
         includeAgreement: Boolean,
+        ignoreMinorDifferences: Boolean,
     ): List<ReviewItemModel> {
         return when (filter) {
-            ReviewFilter.ALL -> if (includeAgreement) {
-                items
-            } else {
-                items.filter { it.category != DiscrepancyCategory.A }
+            ReviewFilter.ALL -> items.filter { item ->
+                val matchesAgreement = includeAgreement || item.category != DiscrepancyCategory.A
+                val isMinorDifference = ignoreMinorDifferences &&
+                    item.category == DiscrepancyCategory.B &&
+                    item.suggestedText != null &&
+                    normalizeMinorArabic(item.ocrText) == normalizeMinorArabic(item.suggestedText)
+                matchesAgreement && !isMinorDifference
             }
             ReviewFilter.DISCREPANCY_ONLY -> items.filter { it.category == DiscrepancyCategory.B }
             ReviewFilter.UNRESOLVED_ONLY -> items.filter { it.reviewStatus == ReviewStatus.UNRESOLVED }
             ReviewFilter.PENDING_ONLY -> items.filter {
                 it.reviewStatus == ReviewStatus.PENDING || it.isStale
             }
+            ReviewFilter.IGNORED_ONLY -> items.filter { it.reviewStatus == ReviewStatus.IGNORED }
         }
+    }
+
+    private fun normalizeMinorArabic(text: String): String {
+        return text
+            .replace(Regex("[أإآ]"), "ا")
+            .replace('ة', 'ه')
+            .replace('ى', 'ي')
+            .trim()
     }
 
     private fun resolveTargetIndex(
@@ -258,9 +272,16 @@ class ReviewViewModel(
             items = currentState.allItems,
             filter = filter,
             includeAgreement = currentState.includeAgreementInAll,
+            ignoreMinorDifferences = currentState.ignoreMinorDifferences,
         )
         val nextIndex = resolveTargetIndex(filtered, currentState.currentItem?.id, 0)
-        selectItemAt(filtered, nextIndex, filter = filter, includeAgreement = currentState.includeAgreementInAll)
+        selectItemAt(
+            filtered = filtered,
+            index = nextIndex,
+            filter = filter,
+            includeAgreement = currentState.includeAgreementInAll,
+            ignoreMinorDifferences = currentState.ignoreMinorDifferences,
+        )
     }
 
     fun toggleIncludeAgreement() {
@@ -270,9 +291,35 @@ class ReviewViewModel(
             items = currentState.allItems,
             filter = currentState.selectedFilter,
             includeAgreement = nextInclude,
+            ignoreMinorDifferences = currentState.ignoreMinorDifferences,
         )
         val nextIndex = resolveTargetIndex(filtered, currentState.currentItem?.id, 0)
-        selectItemAt(filtered, nextIndex, filter = currentState.selectedFilter, includeAgreement = nextInclude)
+        selectItemAt(
+            filtered = filtered,
+            index = nextIndex,
+            filter = currentState.selectedFilter,
+            includeAgreement = nextInclude,
+            ignoreMinorDifferences = currentState.ignoreMinorDifferences,
+        )
+    }
+
+    fun toggleIgnoreMinorDifferences() {
+        val currentState = _uiState.value
+        val nextIgnoreMinor = !currentState.ignoreMinorDifferences
+        val filtered = applyFilter(
+            items = currentState.allItems,
+            filter = currentState.selectedFilter,
+            includeAgreement = currentState.includeAgreementInAll,
+            ignoreMinorDifferences = nextIgnoreMinor,
+        )
+        val nextIndex = resolveTargetIndex(filtered, currentState.currentItem?.id, 0)
+        selectItemAt(
+            filtered = filtered,
+            index = nextIndex,
+            filter = currentState.selectedFilter,
+            includeAgreement = currentState.includeAgreementInAll,
+            ignoreMinorDifferences = nextIgnoreMinor,
+        )
     }
 
     fun goToPrevious() {
@@ -283,6 +330,7 @@ class ReviewViewModel(
             index = currentState.currentIndex - 1,
             filter = currentState.selectedFilter,
             includeAgreement = currentState.includeAgreementInAll,
+            ignoreMinorDifferences = currentState.ignoreMinorDifferences,
         )
     }
 
@@ -294,6 +342,7 @@ class ReviewViewModel(
             index = currentState.currentIndex + 1,
             filter = currentState.selectedFilter,
             includeAgreement = currentState.includeAgreementInAll,
+            ignoreMinorDifferences = currentState.ignoreMinorDifferences,
         )
     }
 
@@ -316,6 +365,7 @@ class ReviewViewModel(
                 index = idxInCurrentFilter,
                 filter = state.selectedFilter,
                 includeAgreement = state.includeAgreementInAll,
+                ignoreMinorDifferences = state.ignoreMinorDifferences,
             )
             _uiState.update { it.copy(pageJumpInput = "", pageJumpError = null) }
             return
@@ -335,6 +385,7 @@ class ReviewViewModel(
         index: Int,
         filter: ReviewFilter,
         includeAgreement: Boolean,
+        ignoreMinorDifferences: Boolean,
     ) {
         val clamped = if (filtered.isEmpty()) 0 else index.coerceIn(0, filtered.lastIndex)
         val item = filtered.getOrNull(clamped)
@@ -346,6 +397,7 @@ class ReviewViewModel(
             it.copy(
                 selectedFilter = filter,
                 includeAgreementInAll = includeAgreement,
+                ignoreMinorDifferences = ignoreMinorDifferences,
                 filteredItems = filtered,
                 currentItem = item,
                 currentIndex = clamped,
@@ -432,6 +484,19 @@ class ReviewViewModel(
         )
     }
 
+    /**
+     * Action 4 — "استبعاد (حذف من المستند)"
+     */
+    fun ignoreItem() {
+        val current = _uiState.value.currentItem ?: return
+        persistDecisionAndAdvance(
+            targetItem = current,
+            newStatus = ReviewStatus.IGNORED,
+            newUserText = null,
+            successMessage = "تم استبعاد الموضع وحذفه من المستند النهائي.",
+        )
+    }
+
     private fun persistDecisionAndAdvance(
         targetItem: ReviewItemModel,
         newStatus: ReviewStatus,
@@ -478,6 +543,7 @@ class ReviewViewModel(
                     items = updatedAll,
                     filter = snapshot.selectedFilter,
                     includeAgreement = snapshot.includeAgreementInAll,
+                    ignoreMinorDifferences = snapshot.ignoreMinorDifferences,
                 )
 
                 val nextTargetItem = when {
@@ -571,6 +637,7 @@ class ReviewViewModel(
                     items = updatedAll,
                     filter = snapshot.selectedFilter,
                     includeAgreement = snapshot.includeAgreementInAll,
+                    ignoreMinorDifferences = snapshot.ignoreMinorDifferences,
                 )
                 val targetIndex = resolveTargetIndex(updatedFiltered, request.itemId, snapshot.currentIndex)
                 val current = updatedFiltered.getOrNull(targetIndex)

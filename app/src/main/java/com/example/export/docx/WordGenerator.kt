@@ -154,20 +154,38 @@ class WordGenerator(
         xwpfDocument: XWPFDocument,
         segments: List<WordTextSegment>,
     ) {
+        val isHeading = isAcademicHeadingParagraph(segments)
         val paragraph = createRtlParagraph(xwpfDocument).apply {
-            spacingBefore = 60
-            spacingAfter = 160
-            setSpacingBetween(1.5)
+            if (isHeading) {
+                spacingBefore = 180
+                spacingAfter = 100
+            } else {
+                spacingBefore = 60
+                spacingAfter = 160
+                setSpacingBetween(1.5)
+            }
         }
+        val fontSize = if (isHeading) ACADEMIC_HEADING_FONT_SIZE_PT else ACADEMIC_BODY_FONT_SIZE_PT
         segments.forEach { segment ->
             createStyledRun(
                 paragraph = paragraph,
                 text = segment.text,
-                fontSize = 14,
-                isBold = false,
+                fontSize = fontSize,
+                isBold = isHeading,
                 isUnresolvedHighlight = segment.isUnresolvedHighlight,
             )
         }
+    }
+
+    internal fun isAcademicHeadingParagraph(segments: List<WordTextSegment>): Boolean {
+        if (segments.any { it.isUnresolvedHighlight }) return false
+        val fullText = segments.joinToString("") { it.text }.trim()
+        if (fullText.isEmpty()) return false
+        if (fullText.first() in BULLET_PREFIXES) return false
+        if (fullText.length > HEADING_MAX_LENGTH) return false
+        val wordCount = fullText.split(WHITESPACE_REGEX).count { it.isNotEmpty() }
+        if (wordCount > HEADING_MAX_WORDS) return false
+        return fullText.last() !in HEADING_EXCLUDED_END_PUNCTUATION
     }
 
     private fun createRtlParagraph(xwpfDocument: XWPFDocument): XWPFParagraph {
@@ -268,6 +286,13 @@ class WordGenerator(
     companion object {
         const val DEFAULT_ARABIC_FONT = "Traditional Arabic"
         const val UNRESOLVED_TEXT_RED_HEX = "B71C1C"
+        const val ACADEMIC_BODY_FONT_SIZE_PT = 14
+        const val ACADEMIC_HEADING_FONT_SIZE_PT = 16
+        private const val HEADING_MAX_LENGTH = 65
+        private const val HEADING_MAX_WORDS = 9
+        private val WHITESPACE_REGEX = Regex("\\s+")
+        private val BULLET_PREFIXES = setOf('-', '•', '✓', '❖')
+        private val HEADING_EXCLUDED_END_PUNCTUATION = setOf('.', '؟', '!', ':', '؛', '،', ',', '"', '»', ')')
         private const val WML_NAMESPACE = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
         private const val XML_NAMESPACE = "http://www.w3.org/XML/1998/namespace"
 

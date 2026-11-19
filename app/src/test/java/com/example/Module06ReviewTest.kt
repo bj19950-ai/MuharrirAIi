@@ -26,6 +26,10 @@ import com.example.domain.model.OcrEngineType
 import com.example.domain.model.OcrPageStatus
 import com.example.domain.model.PageStatus
 import com.example.domain.model.ReviewStatus
+import com.example.export.domain.WordTextAssembler
+import com.example.export.model.DocumentPageModel
+import com.example.export.model.ExportDocumentModel
+import com.example.export.model.WordExportMode
 import com.example.review.model.BoundingBox
 import com.example.review.model.DiscrepancyCategory
 import com.example.review.model.DocumentReviewGateway
@@ -658,6 +662,175 @@ class Module06ReviewTest {
         db.close()
     }
 
+    @Test
+    fun `ignoreItem sets IGNORED status updates counts filters IGNORED_ONLY and WordTextAssembler omits ignored text`() = runTest {
+        val fakeQueue = FakeReviewQueueGateway(
+            listOf(
+                ReviewItemModel(
+                    id = 10L,
+                    documentId = "doc-ignore",
+                    pageNumber = 1,
+                    category = DiscrepancyCategory.B,
+                    ocrText = "رقم تسلسلي 9911",
+                    suggestedText = "رقم تسلسلي 9911",
+                    ocrConfidence = 0.70f,
+                    geminiConfidence = 0.80f,
+                    evidence = "هامش مزعج",
+                    bbox = BoundingBox(10f, 10f, 100f, 40f),
+                    reviewStatus = ReviewStatus.PENDING,
+                    userText = null,
+                    resolvedAt = null,
+                    orderIndex = 0,
+                ),
+                ReviewItemModel(
+                    id = 11L,
+                    documentId = "doc-ignore",
+                    pageNumber = 1,
+                    category = DiscrepancyCategory.B,
+                    ocrText = "العقد الشفوي",
+                    suggestedText = "العقد الشكلي",
+                    ocrConfidence = 0.82f,
+                    geminiConfidence = 0.94f,
+                    evidence = "الكلمة الشكلي أوضح",
+                    bbox = BoundingBox(10f, 60f, 200f, 100f),
+                    reviewStatus = ReviewStatus.PENDING,
+                    userText = null,
+                    resolvedAt = null,
+                    orderIndex = 1,
+                ),
+            ),
+        )
+        val fakeDoc = FakeDocumentReviewGateway("doc-ignore", "تست_استبعاد.pdf")
+        val fakeBitmaps = object : PageBitmapSource {
+            override suspend fun loadPageBitmap(documentId: String, pageNumber: Int): Bitmap =
+                Bitmap.createBitmap(400, 600, Bitmap.Config.ARGB_8888)
+        }
+
+        val vm = ReviewViewModel(
+            documentId = "doc-ignore",
+            reviewQueueGateway = fakeQueue,
+            documentReviewGateway = fakeDoc,
+            pageBitmapSource = fakeBitmaps,
+            savedStateHandle = SavedStateHandle(),
+            ioDispatcher = mainDispatcher,
+            defaultDispatcher = mainDispatcher,
+            clock = { 55555L },
+        )
+        advanceUntilIdle()
+
+        vm.ignoreItem()
+        advanceUntilIdle()
+
+        val ignoredEntity = fakeQueue.itemsFlow.value.first { it.id == 10L }
+        assertEquals(ReviewStatus.IGNORED, ignoredEntity.reviewStatus)
+        assertNull(ignoredEntity.userText)
+        assertEquals(1, vm.uiState.value.stats.ignored)
+        assertEquals(1, vm.uiState.value.stats.remaining)
+        assertEquals(11L, vm.uiState.value.currentItem?.id)
+
+        vm.selectFilter(ReviewFilter.IGNORED_ONLY)
+        advanceUntilIdle()
+        assertEquals(listOf(10L), vm.uiState.value.filteredItems.map { it.id })
+
+        val plan = WordTextAssembler.buildPlan(
+            document = ExportDocumentModel("doc-ignore", "ملف الاختبار", 55555L),
+            pages = listOf(DocumentPageModel("p1", "doc-ignore", 1, "رقم تسلسلي 9911\nالعقد الشفوي")),
+            reviewItems = fakeQueue.itemsFlow.value.map { item ->
+                if (item.id == 11L) item.copy(reviewStatus = ReviewStatus.APPROVED_GEMINI, userText = "العقد الشكلي") else item
+            },
+            mode = WordExportMode.MATCH_ORIGINAL,
+        )
+        val combinedText = plan.pages.single().segments.joinToString(" ") { it.text }
+        assertFalse(combinedText.contains("9911"))
+        assertTrue(combinedText.contains("العقد الشكلي"))
+    }
+
+    @Test
+    fun `toggleIgnoreMinorDifferences hides minor hamza taa alef maksura discrepancies in ALL filter`() = runTest {
+        val fakeQueue = FakeReviewQueueGateway(
+            listOf(
+                ReviewItemModel(
+                    id = 21L,
+                    documentId = "doc-minor",
+                    pageNumber = 1,
+                    category = DiscrepancyCategory.B,
+                    ocrText = "احمد إلى المدينه",
+                    suggestedText = "أحمد الي المدينة",
+                    ocrConfidence = 0.85f,
+                    geminiConfidence = 0.90f,
+                    evidence = "همزة وتاء مربوطة وألف مقصورة",
+                    bbox = null,
+                    reviewStatus = ReviewStatus.PENDING,
+                    userText = null,
+                    resolvedAt = null,
+                    orderIndex = 0,
+                ),
+                ReviewItemModel(
+                    id = 22L,
+                    documentId = "doc-minor",
+                    pageNumber = 1,
+                    category = DiscrepancyCategory.B,
+                    ocrText = "البيع",
+                    suggestedText = "الإيجار",
+                    ocrConfidence = 0.80f,
+                    geminiConfidence = 0.92f,
+                    evidence = "فرق جوهري في المعنى",
+                    bbox = null,
+                    reviewStatus = ReviewStatus.PENDING,
+                    userText = null,
+                    resolvedAt = null,
+                    orderIndex = 1,
+                ),
+                ReviewItemModel(
+                    id = 23L,
+                    documentId = "doc-minor",
+                    pageNumber = 1,
+                    category = DiscrepancyCategory.C,
+                    ocrText = "إسلام",
+                    suggestedText = "اسلام",
+                    ocrConfidence = 0.60f,
+                    geminiConfidence = 0.88f,
+                    evidence = "تصنيف C يبقى ظاهراً",
+                    bbox = null,
+                    reviewStatus = ReviewStatus.PENDING,
+                    userText = null,
+                    resolvedAt = null,
+                    orderIndex = 2,
+                ),
+            ),
+        )
+        val fakeDoc = FakeDocumentReviewGateway("doc-minor", "فروقات.pdf")
+        val fakeBitmaps = object : PageBitmapSource {
+            override suspend fun loadPageBitmap(documentId: String, pageNumber: Int): Bitmap? = null
+        }
+
+        val vm = ReviewViewModel(
+            documentId = "doc-minor",
+            reviewQueueGateway = fakeQueue,
+            documentReviewGateway = fakeDoc,
+            pageBitmapSource = fakeBitmaps,
+            savedStateHandle = SavedStateHandle(),
+            ioDispatcher = mainDispatcher,
+            defaultDispatcher = mainDispatcher,
+        )
+        advanceUntilIdle()
+
+        assertFalse(vm.uiState.value.ignoreMinorDifferences)
+        assertEquals(listOf(21L, 22L, 23L), vm.uiState.value.filteredItems.map { it.id })
+
+        vm.toggleIgnoreMinorDifferences()
+        advanceUntilIdle()
+
+        assertTrue(vm.uiState.value.ignoreMinorDifferences)
+        assertEquals(listOf(22L, 23L), vm.uiState.value.filteredItems.map { it.id })
+
+        vm.toggleIgnoreMinorDifferences()
+        advanceUntilIdle()
+
+        assertFalse(vm.uiState.value.ignoreMinorDifferences)
+        assertEquals(listOf(21L, 22L, 23L), vm.uiState.value.filteredItems.map { it.id })
+    }
+
     private class FakeReviewQueueGateway(initialItems: List<ReviewItemModel>) : ReviewQueueGateway {
         val itemsFlow = MutableStateFlow(initialItems)
         var shouldFailNextSave = false
@@ -670,12 +843,14 @@ class Module06ReviewTest {
                 val approved = nonAgreement.count { it.reviewStatus == ReviewStatus.APPROVED_GEMINI }
                 val edited = nonAgreement.count { it.reviewStatus == ReviewStatus.MANUALLY_EDITED }
                 val unresolved = nonAgreement.count { it.reviewStatus == ReviewStatus.UNRESOLVED }
+                val ignored = nonAgreement.count { it.reviewStatus == ReviewStatus.IGNORED }
                 val remaining = nonAgreement.count { it.reviewStatus == ReviewStatus.PENDING || it.isStale }
                 ReviewStatusCounts(
                     total = nonAgreement.size,
                     approvedGemini = approved,
                     manuallyEdited = edited,
                     unresolved = unresolved,
+                    ignored = ignored,
                     remaining = remaining,
                 )
             }
