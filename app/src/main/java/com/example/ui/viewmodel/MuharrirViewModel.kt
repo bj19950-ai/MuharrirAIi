@@ -42,6 +42,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -184,6 +185,9 @@ class MuharrirViewModel(
 
     private val _suspiciousFixState = MutableStateFlow(SuspiciousFixUiState())
     val suspiciousFixState: StateFlow<SuspiciousFixUiState> = _suspiciousFixState.asStateFlow()
+
+    private val _reprocessingMissingPageIds = MutableStateFlow<Set<String>>(emptySet())
+    val reprocessingMissingPageIds: StateFlow<Set<String>> = _reprocessingMissingPageIds.asStateFlow()
 
     private val suspiciousRefreshTrigger = MutableStateFlow(0)
 
@@ -328,6 +332,19 @@ class MuharrirViewModel(
         started = SharingStarted.WhileSubscribed(5_000),
         initialValue = emptyList(),
     )
+
+    val pagesWithMissingContent: StateFlow<List<PageRecord>> = activeDocument
+        .map { doc ->
+            doc?.pages
+                ?.filter { it.hasMissingContent }
+                ?.sortedBy { it.originalPageNumber }
+                .orEmpty()
+        }
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(5_000),
+            initialValue = emptyList(),
+        )
 
     init {
         viewModelScope.launch {
@@ -938,6 +955,37 @@ class MuharrirViewModel(
             }
             _suspiciousFixState.update { it.copy(isRunning = false) }
             suspiciousRefreshTrigger.update { it + 1 }
+        }
+    }
+
+    fun forceGeminiExtractionForPage(documentId: String, pageNumber: Int) {
+        val pageId = activeDocument.value
+            ?.takeIf { it.id == documentId }
+            ?.pages
+            ?.firstOrNull { it.originalPageNumber == pageNumber }
+            ?.pageId
+            ?: "${documentId}_page_$pageNumber"
+
+        if (_reprocessingMissingPageIds.value.contains(pageId)) return
+
+        viewModelScope.launch {
+            _reprocessingMissingPageIds.update { it + pageId }
+            try {
+                val result = repository.forceGeminiExtractionForPage(documentId, pageNumber)
+                result.fold(
+                    onSuccess = {
+                        _workspaceNoticeAr.value =
+                            "تمت إعادة استخراج نص صفحة $pageNumber بالكامل عبر Gemini واعتمادها مباشرة دون إضافتها لطابور المراجعة."
+                    },
+                    onFailure = { err ->
+                        _workspaceNoticeAr.value =
+                            err.message ?: "تعذرت إعادة استخراج صفحة $pageNumber عبر Gemini."
+                    },
+                )
+            } finally {
+                _reprocessingMissingPageIds.update { it - pageId }
+                suspiciousRefreshTrigger.update { it + 1 }
+            }
         }
     }
 

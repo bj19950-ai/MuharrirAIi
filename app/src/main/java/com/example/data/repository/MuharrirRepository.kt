@@ -436,6 +436,135 @@ class MuharrirRepository(
         )
     }
 
+    suspend fun getPagesWithMissingContent(documentId: String): List<PageRecord> =
+        withContext(Dispatchers.IO) {
+            val ocrByPageId = ocrResultDao.getOcrResultsForDocument(documentId).associateBy { it.pageId }
+            val geminiByPageId = geminiAnalysisDao.getAnalysesForDocument(documentId).associateBy { it.pageId }
+            pageDao.getPagesWithMissingContent(documentId).map { entity ->
+                entity.toDomain(
+                    ocrResultEntity = ocrByPageId[entity.pageId],
+                    geminiAnalysisEntity = geminiByPageId[entity.pageId],
+                )
+            }
+        }
+
+    fun observePagesWithMissingContent(documentId: String): Flow<List<PageRecord>> =
+        pageDao.observePagesWithMissingContent(documentId).map { entities ->
+            entities.map { it.toDomain() }
+        }
+
+    /**
+     * Forces full Gemini text extraction for a single page flagged as missing content,
+     * bypassing the review queue completely:
+     * - Overwrites recognizedText in Room
+     * - Sets hasMissingContent = false and marks the page REVIEWED
+     * - Deletes ALL existing ReviewItemEntity records for this page
+     * - Does NOT run the comparison engine again for this page
+     */
+    suspend fun forceGeminiExtractionForPage(
+        documentId: String,
+        pageNumber: Int,
+    ): Result<String> = withContext(Dispatchers.IO) {
+        val coordinator = geminiCoordinator
+            ?: return@withContext Result.failure(IllegalStateException("منسق Gemini غير متوفر في هذا التكوين."))
+
+        val doc = getDocumentById(documentId)
+            ?: return@withContext Result.failure(IllegalStateException("المستند المطلوب غير موجود."))
+
+        val page = doc.pages.firstOrNull { it.originalPageNumber == pageNumber }
+            ?: return@withContext Result.failure(IllegalStateException("الصفحة رقم $pageNumber غير موجودة في المستند."))
+
+        val privateFile = storage.resolvePrivatePdfIfExists(doc.internalStorageRef)
+            ?: return@withContext Result.failure(IllegalStateException("تعذر الوصول إلى ملف PDF في التخزين الخاص."))
+
+        val hasEnabledKey = geminiKeyVault?.listKeys()?.any { it.isEnabled } ?: true
+        if (!hasEnabledKey) {
+            return@withContext Result.failure(
+                IllegalStateException("لا يوجد مفتاح Gemini API مفعّل حالياً. أضف أو فعّل مفتاحاً من الإعدادات."),
+            )
+        }
+
+        var rawBitmap: Bitmap? = null
+        try {
+            rawBitmap = pageEngine.renderFromFile(
+                pdfFile = privateFile,
+                pageIndex = (pageNumber - 1).coerceAtLeast(0),
+                maxWidthPx = 1600,
+            )
+            if (rawBitmap == null) {
+                return@withContext Result.failure(
+                    IllegalStateException("تعذر تصيير صورة الصفحة $pageNumber لإرسالها إلى Gemini."),
+                )
+            }
+
+            val extractionResult = coordinator.extractTextFallbackWithFailover(
+                pageNumber = pageNumber,
+                rawPageBitmap = rawBitmap,
+            )
+            val extractedText = extractionResult.getOrElse { throwable ->
+                if (throwable is CancellationException) throw throwable
+                return@withContext Result.failure(throwable)
+            }.trim()
+
+            val now = System.currentTimeMillis()
+            val existingOcr = ocrResultDao.getOcrResultForPage(page.pageId)
+            val updatedOcrEntity = if (existingOcr != null) {
+                existingOcr.copy(
+                    recognizedText = extractedText,
+                    segmentsJson = "[]",
+                    recognizedAtMillis = now,
+                )
+            } else {
+                OcrResultEntity(
+                    pageId = page.pageId,
+                    documentId = documentId,
+                    pageNumber = pageNumber,
+                    engineType = (page.ocrEngineUsed ?: OcrEngineType.TESSERACT).name,
+                    recognizedText = extractedText,
+                    segmentsJson = "[]",
+                    confidence = null,
+                    imageWidthPx = rawBitmap.width,
+                    imageHeightPx = rawBitmap.height,
+                    recognizedAtMillis = now,
+                )
+            }
+
+            ocrResultDao.upsertOcrResult(updatedOcrEntity)
+            reviewItemDao.deleteAllForPage(page.pageId)
+            pageDao.updatePageMissingContent(page.pageId, false)
+            pageDao.updatePageOcrState(
+                pageId = page.pageId,
+                pageStatus = PageStatus.REVIEWED.name,
+                ocrStatus = OcrPageStatus.DONE.name,
+                ocrEngineUsed = page.ocrEngineUsed?.name ?: updatedOcrEntity.engineType,
+                ocrErrorMessageAr = null,
+                ocrUpdatedAtMillis = now,
+            )
+            markPageGeminiRepaired(page.pageId, true)
+
+            if (doc.status == DocumentStatus.NEEDS_REVIEW && doc.reviewApprovedAt == null) {
+                val countsAfter = reviewItemDao.countByStatus(documentId, includeAgreements = false)
+                val hasPending = (countsAfter[ReviewStatus.PENDING] ?: 0) > 0 ||
+                    (countsAfter[ReviewStatus.STALE] ?: 0) > 0
+                if (!hasPending) {
+                    documentDao.updateProcessingProgress(
+                        documentId = documentId,
+                        processingStatus = DocumentStatus.PROCESSING.name,
+                        processingProgressPercent = doc.processingProgressPercent,
+                        lastModifiedMillis = now,
+                        errorMessageAr = null,
+                    )
+                }
+            }
+
+            Result.success(extractedText)
+        } finally {
+            if (rawBitmap != null && !rawBitmap.isRecycled) {
+                rawBitmap.recycle()
+            }
+        }
+    }
+
     suspend fun reprocessFailedPages(
         context: Context,
         documentId: String,
@@ -1161,6 +1290,10 @@ class MuharrirRepository(
                             is GeminiPageAnalysisOutcome.Success -> {
                                 geminiAnalysisDao.upsertAnalysis(outcome.record.toEntity())
                                 pageDao.updatePageStatus(page.pageId, PageStatus.ANALYZED.name)
+                                pageDao.updatePageMissingContent(
+                                    pageId = page.pageId,
+                                    hasMissingContent = outcome.record.isMissingLargeContent,
+                                )
                                 comparisonEngine.compareAndPersistForPage(
                                     documentId = documentId,
                                     pageId = page.pageId,

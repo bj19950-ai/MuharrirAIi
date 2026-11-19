@@ -233,6 +233,7 @@ class GeminiAnalysisCoordinator(
                                     items = normalizedResponse.items,
                                     rawValidatedJson = validation.normalizedJson,
                                     analyzedAtMillis = System.currentTimeMillis(),
+                                    isMissingLargeContent = normalizedResponse.isMissingLargeContent,
                                 )
                                 val statusMsg = "اكتمل تحليل الصفحة ${page.originalPageNumber} (${normalizedResponse.items.size} ملاحظة)."
                                 keyVault.recordRequestOutcome(

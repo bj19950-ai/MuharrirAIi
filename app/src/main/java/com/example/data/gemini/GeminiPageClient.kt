@@ -56,10 +56,12 @@ object GeminiPromptBuilder {
         6. If the image region is blurry/ambiguous and does not clearly confirm a correction, DO NOT invent text: set "suggested_text" equal to "ocr_text", set "requires_review" to true, and explain the visual ambiguity in "evidence".
         7. Recognize headings or footnotes where clearly visible ("reason_type": "structure").
         8. Every suggestion item MUST include concrete evidence citing letter shapes, diacritic dots (نقاط الحروف), context, lexicon, morphology, or structure.
-        9. Output strictly valid JSON matching the exact schema with no extra wrapper text:
+        9. Does the OCR text miss entire paragraphs, sections, or headings that are clearly visible in the image? If yes, set "isMissingLargeContent" to true in your JSON response; otherwise set "isMissingLargeContent" to false.
+        10. Output strictly valid JSON matching the exact schema with no extra wrapper text:
         {
           "page_id": "string",
           "page_number": 1,
+          "isMissingLargeContent": false,
           "items": [
             {
               "ocr_text": "string",

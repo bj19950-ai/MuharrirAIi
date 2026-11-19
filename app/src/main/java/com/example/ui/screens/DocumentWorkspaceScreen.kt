@@ -124,6 +124,8 @@ fun DocumentWorkspaceScreen(
     pagesNeedingReprocessingCount: Int = 0,
     suspiciousPages: List<PageRecord> = emptyList(),
     suspiciousFixState: SuspiciousFixUiState = SuspiciousFixUiState(),
+    pagesWithMissingContent: List<PageRecord> = emptyList(),
+    reprocessingMissingPageIds: Set<String> = emptySet(),
     geminiState: GeminiExecutionUiState,
     geminiKeys: List<GeminiKeyRecord>,
     geminiUsageStats: GeminiUsageStats,
@@ -142,6 +144,7 @@ fun DocumentWorkspaceScreen(
     onRetrySingleOcrPage: (android.content.Context, String, String) -> Unit,
     onStartGeminiAnalysis: (String, String?, Int?, Int?) -> Unit,
     onFixSuspiciousPagesWithGemini: (String) -> Unit = {},
+    onForceGeminiExtractionForPage: (String, Int) -> Unit = { _, _ -> },
     onPauseGeminiAnalysis: () -> Unit,
     wordExportViewModel: WordExportViewModel,
     onOpenSettings: () -> Unit,
@@ -223,7 +226,8 @@ fun DocumentWorkspaceScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .widthIn(max = 980.dp)
-                .align(Alignment.TopCenter),
+                .align(Alignment.TopCenter)
+                .testTag("workspace_lazy_column"),
             contentPadding = PaddingValues(16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
@@ -376,6 +380,19 @@ fun DocumentWorkspaceScreen(
                         onPause = onPauseOcr,
                         onReprocessFailedPages = { onReprocessFailedPages(context, document.id) },
                     )
+                }
+
+                if (pagesWithMissingContent.isNotEmpty()) {
+                    item {
+                        MissingContentAuditCard(
+                            pagesWithMissingContent = pagesWithMissingContent,
+                            reprocessingPageIds = reprocessingMissingPageIds,
+                            isAnyGlobalBatchRunning = ocrState.isRunning || geminiState.isRunning || suspiciousFixState.isRunning,
+                            onReprocessPage = { pageNumber ->
+                                onForceGeminiExtractionForPage(document.id, pageNumber)
+                            },
+                        )
+                    }
                 }
 
                 item {
@@ -2013,5 +2030,112 @@ private fun SuspiciousPagesWarningCard(
         }
     }
 }
+
+@Composable
+private fun MissingContentAuditCard(
+    pagesWithMissingContent: List<PageRecord>,
+    reprocessingPageIds: Set<String>,
+    isAnyGlobalBatchRunning: Boolean,
+    onReprocessPage: (Int) -> Unit,
+) {
+    val ext = MuharrirTheme.extendedColors
+    val pageNumbersText = remember(pagesWithMissingContent) {
+        pagesWithMissingContent.joinToString("، ") { it.originalPageNumber.toString() }
+    }
+
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("missing_content_audit_card"),
+        colors = CardDefaults.cardColors(containerColor = ext.warningContainer),
+        border = BorderStroke(1.5.dp, ext.warning),
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.Top,
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.WarningAmber,
+                    contentDescription = "تحذير نص مفقود",
+                    tint = ext.warning,
+                    modifier = Modifier.padding(top = 2.dp),
+                )
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    Text(
+                        text = "تحذير: اكتشف Gemini أن النص مفقود في هذه الصفحات: [$pageNumbersText]",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = ext.onWarningContainer,
+                        modifier = Modifier.testTag("missing_content_audit_text"),
+                    )
+                    Text(
+                        text = "إعادة الاستخراج تستخرج النص الكامل عبر Gemini وتعتمد الصفحة نهائياً دون إضافة عناصر جديدة إلى طابور المراجعة.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = ext.onWarningContainer.copy(alpha = 0.85f),
+                    )
+                }
+            }
+
+            HorizontalDivider(color = ext.warning.copy(alpha = 0.35f))
+
+            pagesWithMissingContent.forEach { page ->
+                val isReprocessing = reprocessingPageIds.contains(page.pageId)
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("missing_content_page_row_${page.originalPageNumber}"),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        text = "صفحة ${page.originalPageNumber}",
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        color = ext.onWarningContainer,
+                    )
+                    if (isReprocessing) {
+                        CircularProgressIndicator(
+                            modifier = Modifier
+                                .size(28.dp)
+                                .testTag("missing_content_spinner_${page.originalPageNumber}"),
+                            strokeWidth = 2.5.dp,
+                            color = ext.warning,
+                        )
+                    } else {
+                        Button(
+                            onClick = { onReprocessPage(page.originalPageNumber) },
+                            enabled = !isAnyGlobalBatchRunning,
+                            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = ext.warning,
+                                contentColor = ext.onWarning,
+                            ),
+                            modifier = Modifier
+                                .heightIn(min = 48.dp)
+                                .testTag("missing_content_reprocess_button_${page.originalPageNumber}"),
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.Refresh,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp),
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("إعادة استخراج")
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 
 

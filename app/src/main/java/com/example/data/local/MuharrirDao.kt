@@ -172,6 +172,15 @@ interface PageDao {
     @Query("UPDATE pages SET pageStatus = :pageStatus WHERE pageId = :pageId")
     suspend fun updatePageStatus(pageId: String, pageStatus: String)
 
+    @Query("UPDATE pages SET hasMissingContent = :hasMissingContent WHERE pageId = :pageId")
+    suspend fun updatePageMissingContent(pageId: String, hasMissingContent: Boolean)
+
+    @Query("SELECT * FROM pages WHERE documentId = :documentId AND hasMissingContent = 1 ORDER BY originalPageNumber ASC")
+    suspend fun getPagesWithMissingContent(documentId: String): List<PageEntity>
+
+    @Query("SELECT * FROM pages WHERE documentId = :documentId AND hasMissingContent = 1 ORDER BY originalPageNumber ASC")
+    fun observePagesWithMissingContent(documentId: String): Flow<List<PageEntity>>
+
     @Query("DELETE FROM pages WHERE documentId = :documentId")
     suspend fun deletePagesForDocument(documentId: String)
 
@@ -466,6 +475,9 @@ interface ReviewItemDao {
 
     @Query("DELETE FROM review_items WHERE page_id = :pageId AND review_status = 'PENDING'")
     suspend fun deletePendingForPage(pageId: String)
+
+    @Query("DELETE FROM review_items WHERE page_id = :pageId")
+    suspend fun deleteAllForPage(pageId: String): Int
 
     @Query("DELETE FROM review_items WHERE document_id = :documentId")
     suspend fun deleteAllForDocument(documentId: String)

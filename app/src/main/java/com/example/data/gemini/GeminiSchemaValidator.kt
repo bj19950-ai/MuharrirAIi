@@ -22,6 +22,7 @@ sealed interface GeminiValidationResult {
  * {
  *   "page_id": "string",
  *   "page_number": 1,
+ *   "isMissingLargeContent": false,
  *   "items": [
  *     {
  *       "ocr_text": "string",
@@ -61,6 +62,14 @@ object GeminiSchemaValidator {
         val pageNumberDouble = pageNumberNum.toDouble()
         if (pageNumberDouble % 1.0 != 0.0 || pageNumberNum.toInt() < 1) {
             return GeminiValidationResult.Malformed("حقل page_number يجب أن يكون عدداً صحيحاً أكبر من أو يساوي 1.")
+        }
+
+        val isMissingLargeContent = when (val rawMissingFlag = rootMap["isMissingLargeContent"]) {
+            null -> false
+            is Boolean -> rawMissingFlag
+            else -> return GeminiValidationResult.Malformed(
+                "حقل isMissingLargeContent يجب أن يكون منطقياً (true/false).",
+            )
         }
 
         val rawItems = rootMap["items"] as? List<*>
@@ -132,6 +141,7 @@ object GeminiSchemaValidator {
             page_id = pageId.trim(),
             page_number = pageNumberNum.toInt(),
             items = validatedItems,
+            isMissingLargeContent = isMissingLargeContent,
         )
         val normalizedJson = responseAdapter.toJson(typed)
         return GeminiValidationResult.Valid(response = typed, normalizedJson = normalizedJson)

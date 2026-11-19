@@ -160,6 +160,8 @@ fun MuharrirApp(
     val pagesNeedingReprocessingCount by viewModel.pagesNeedingReprocessingCount.collectAsStateWithLifecycle()
     val suspiciousPages by viewModel.suspiciousPages.collectAsStateWithLifecycle()
     val suspiciousFixState by viewModel.suspiciousFixState.collectAsStateWithLifecycle()
+    val pagesWithMissingContent by viewModel.pagesWithMissingContent.collectAsStateWithLifecycle()
+    val reprocessingMissingPageIds by viewModel.reprocessingMissingPageIds.collectAsStateWithLifecycle()
     val appearancePreferences by viewModel.appearancePreferences.collectAsStateWithLifecycle()
     val autoAcceptHighConfidenceGemini by viewModel.autoAcceptHighConfidenceGemini.collectAsStateWithLifecycle()
     var showLaunchSplash by rememberSaveable { mutableStateOf(true) }
@@ -388,6 +390,8 @@ fun MuharrirApp(
                             pagesNeedingReprocessingCount = pagesNeedingReprocessingCount,
                             suspiciousPages = suspiciousPages,
                             suspiciousFixState = suspiciousFixState,
+                            pagesWithMissingContent = pagesWithMissingContent,
+                            reprocessingMissingPageIds = reprocessingMissingPageIds,
                             geminiState = geminiExecutionState,
                             geminiKeys = geminiKeys,
                             geminiUsageStats = geminiUsageStats,
@@ -406,6 +410,7 @@ fun MuharrirApp(
                             onRetrySingleOcrPage = viewModel::retrySingleOcrPage,
                             onStartGeminiAnalysis = viewModel::startGeminiAnalysis,
                             onFixSuspiciousPagesWithGemini = viewModel::fixSuspiciousPagesWithGemini,
+                            onForceGeminiExtractionForPage = viewModel::forceGeminiExtractionForPage,
                             onPauseGeminiAnalysis = viewModel::pauseGeminiAnalysis,
                             wordExportViewModel = wordExportViewModel,
                             onOpenSettings = { navigateToRoute(MuharrirRoutes.ROUTE_SETTINGS) },

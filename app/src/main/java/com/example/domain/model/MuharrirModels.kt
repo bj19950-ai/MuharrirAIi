@@ -215,6 +215,7 @@ data class PageRecord(
     val ocrErrorMessageAr: String? = null,
     val ocrResult: OcrResult? = null,
     val geminiAnalysis: GeminiPageAnalysisRecord? = null,
+    val hasMissingContent: Boolean = false,
 )
 
 data class ExportedDocument(
@@ -388,6 +389,7 @@ data class GeminiPageAnalysisResponse(
     val page_id: String,
     val page_number: Int,
     val items: List<GeminiSuggestionItem>,
+    val isMissingLargeContent: Boolean = false,
 )
 
 data class GeminiPageAnalysisRecord(
@@ -399,5 +401,6 @@ data class GeminiPageAnalysisRecord(
     val items: List<GeminiSuggestionItem>,
     val rawValidatedJson: String,
     val analyzedAtMillis: Long,
+    val isMissingLargeContent: Boolean = false,
 )
 

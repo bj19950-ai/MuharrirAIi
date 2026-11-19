@@ -78,6 +78,7 @@ data class PageEntity(
     val ocrEngineUsed: String? = null,
     val ocrErrorMessageAr: String? = null,
     val ocrUpdatedAtMillis: Long? = null,
+    val hasMissingContent: Boolean = false,
 )
 
 @Entity(
@@ -229,9 +230,13 @@ object GeminiAnalysisJsonCodec {
     private val moshi = Moshi.Builder().build()
     private val adapter = moshi.adapter(GeminiPageAnalysisResponse::class.java)
 
+    fun responseFromValidatedJson(json: String): GeminiPageAnalysisResponse? {
+        if (json.isBlank()) return null
+        return runCatching { adapter.fromJson(json) }.getOrNull()
+    }
+
     fun itemsFromValidatedJson(json: String): List<GeminiSuggestionItem> {
-        if (json.isBlank()) return emptyList()
-        return runCatching { adapter.fromJson(json)?.items.orEmpty() }.getOrDefault(emptyList())
+        return responseFromValidatedJson(json)?.items.orEmpty()
     }
 }
 
@@ -319,19 +324,24 @@ fun PageEntity.toDomain(
         ocrErrorMessageAr = ocrErrorMessageAr,
         ocrResult = ocrResultEntity?.toDomain(),
         geminiAnalysis = geminiAnalysisEntity?.toDomain(),
+        hasMissingContent = hasMissingContent,
     )
 }
 
-fun GeminiAnalysisEntity.toDomain(): GeminiPageAnalysisRecord = GeminiPageAnalysisRecord(
-    pageId = pageId,
-    documentId = documentId,
-    pageNumber = pageNumber,
-    modelId = modelId,
-    usedKeyLabel = usedKeyLabel,
-    items = GeminiAnalysisJsonCodec.itemsFromValidatedJson(rawValidatedJson),
-    rawValidatedJson = rawValidatedJson,
-    analyzedAtMillis = analyzedAtMillis,
-)
+fun GeminiAnalysisEntity.toDomain(): GeminiPageAnalysisRecord {
+    val decoded = GeminiAnalysisJsonCodec.responseFromValidatedJson(rawValidatedJson)
+    return GeminiPageAnalysisRecord(
+        pageId = pageId,
+        documentId = documentId,
+        pageNumber = pageNumber,
+        modelId = modelId,
+        usedKeyLabel = usedKeyLabel,
+        items = decoded?.items.orEmpty(),
+        rawValidatedJson = rawValidatedJson,
+        analyzedAtMillis = analyzedAtMillis,
+        isMissingLargeContent = decoded?.isMissingLargeContent == true,
+    )
+}
 
 fun GeminiPageAnalysisRecord.toEntity(): GeminiAnalysisEntity = GeminiAnalysisEntity(
     pageId = pageId,
