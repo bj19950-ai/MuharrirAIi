@@ -1,22 +1,37 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://ai.google.dev/static/site-assets/images/share-ais-513315318.png" />
-</div>
+# مُحَرِّر AI — Muharrir AI
 
-# Run and deploy your AI Studio app
+تطبيق أندرويد ذكي لتحويل محاضرات PDF العربية المصورة (الممسوحة ضوئياً) إلى مستندات Word قابلة للتحرير والدراسة. 
+صُمم هذا التطبيق خصيصاً لطلاب الحقوق والعلوم الإنسانية، ليكون "مصنعاً" يغذي تطبيقات الذكاء الاصطناعي الأخرى (مثل ChatGPT أو Claude) بنصوص نظيفة ومنسقة، مما يوفر الكثير من التوكنز (Tokens) ويسهل عملية إعداد الملخصات والامتحانات.
 
-This contains everything you need to run your app locally.
+## ✨ المزايا الأساسية
+- **استخراج محلي (Offline):** يستخدم مكتبة Tesseract4Android كأساس لقراءة النصوص العربية دون إنترنت، مع توفر محرك Google ML Kit كخيار ثانوي للنصوص اللاتينية والأرقام.
+- **مراجعة ذكية (Smart Review):** يستعين بـ Gemini API لمقارنة النص المستخرج بالصورة الأصلية، واكتشاف الكلمات المشوهة وتصحيحها مع عرض قصاصات بصرية، وتصنيف الفروقات، وخيار قبول الاقتراحات عالية الثقة تلقائياً.
+- **تصدير Word أصيل (DOCX):** إنشاء ملفات Word تدعم اللغة العربية واتجاه RTL مع تنظيف تلقائي لتشوهات OCR، ودعم وضعي التصدير (مطابقة الأصل والتنسيق الأكاديمي)، مع تمييز الكلمات غير المحسومة.
+- **إدارة مفاتيح API:** دعم إضافة مفاتيح متعددة واختبار صلاحيتها واختيار نموذج Gemini، مع نظام تبديل تلقائي (Failover) عند انتهاء الحصة المجانية أو محدودية الطلبات.
+- **معالجة آمنة للصفحات:** فحص تلقائي للصفحات التي فشل فيها Tesseract أو التي تقل فيها كمية النص بشكل مريب (مع استثناء الصفحات الفارغة بصرياً)، إضافةً إلى رصد الصفحات ذات المحتوى المفقود عبر Gemini مع إمكانية إعادة استخراجها يدوياً بالكامل بضغطة زر دون توليد عناصر مراجعة جديدة، مما يحمي قائمة المراجعة من الإغراق.
+- **حفظ واستئناف:** معالجة الملفات الكبيرة (مئات الصفحات) على دفعات مع دعم تحديد نطاق الصفحات، وحفظ التقدم واستئناف الاستيراد وOCR المنقطعين تلقائياً في قاعدة بيانات Room.
 
-View your app in AI Studio: https://ai.studio/apps/5b66ed21-2b49-47fd-9fc3-e697059af599
+## 🛠️ التقنيات المستخدمة
+- **اللغة:** Kotlin 2.2.10
+- **واجهة المستخدم:** Jetpack Compose (دعم RTL وتصميم Material 3)
+- **قاعدة البيانات:** Room Database 2.7.0 (الإصدار السادس للهيكل)
+- **محرك OCR:** Tesseract4Android 4.9.0 (مع ملف اللغة العربية `ara.traineddata`)، و Google ML Kit Text Recognition 16.0.1 (ثانوي للاتينية والأرقام)
+- **الذكاء الاصطناعي:** Google Gemini API SDK (`generativeai` 0.9.0) مع Moshi 1.15.2 للتحقق من مخرجات JSON
+- **أمان المفاتيح:** AndroidX Security Crypto 1.1.0 (`EncryptedSharedPreferences` المدعومة بـ Android Keystore)
+- **إنشاء ملفات Word:** Apache POI for Android (`poi-android` 3.17)
 
-## Run Locally
+## 🚀 كيف تستخدم التطبيق؟
+1. حمل التطبيق على هاتفك.
+2. احصل على مفتاح API مجاني من [Google AI Studio](https://aistudio.google.com/).
+3. ادخل إلى إعدادات التطبيق، وأضف مفتاحك (يُحفظ بأمان باستخدام `EncryptedSharedPreferences` المدعومة بـ `Android Keystore`).
+4. ابدأ باستيراد ملف الـ PDF الخاص بك، واختر نطاق الصفحات (لتوفير التوكنز).
+5. اترك التطبيق يعمل، ثم راجع التصحيحات المقترحة، وصدّر ملف الـ Word بضغطة زر!
 
-**Prerequisites:**  [Android Studio](https://developer.android.com/studio)
+## ⚠️ ملاحظات هامة
+- التطبيق يستخدم الحصة المجانية من Gemini API. يُنصح بعدم معالجة أكثر من 150 صفحة دفعة واحدة إذا كنت تستخدم مفتاحاً مجانياً.
+- ملف اللغة العربية لـ Tesseract (`ara.traineddata`) مضمن داخل التطبيق ليعمل دون إنترنت.
 
+## 📄 الرخصة (License)
+هذا المشروع مفتوح المصدر ومتاح للجميع للاستخدام والتطوير. صُنع بشغف لخدمة طلاب العلم.
 
-1. Open Android Studio
-2. Select **Open** and choose the directory containing this project
-3. Allow Android Studio to fix any incompatibilities as it imports the project.
-4. Create a file named `.env` in the project directory and set `GEMINI_API_KEY` in that file to your Gemini API key (see `.env.example` for an example)
-5. Remove this line from the app's `build.gradle.kts` file: `signingConfig = signingConfigs.getByName("debugConfig")`
-6. Run the app on an emulator or physical device
-7. If you have already published your app in AI Studio, please [request upload key reset](https://support.google.com/googleplay/android-developer/answer/9842756#zippy=%2Crequest-an-upload-key-reset) in Google Play Console.
+Note: some components may be exported from Google AI Studio and subject to Google's terms.
