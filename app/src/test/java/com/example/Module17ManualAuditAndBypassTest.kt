@@ -65,6 +65,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import org.robolectric.shadows.ShadowLooper
 import java.io.File
 
 @RunWith(RobolectricTestRunner::class)
@@ -95,6 +96,8 @@ class Module17ManualAuditAndBypassTest {
     private fun openInMemoryDb(): MuharrirDatabase =
         Room.inMemoryDatabaseBuilder(context, MuharrirDatabase::class.java)
             .allowMainThreadQueries()
+            .setQueryExecutor { it.run() }
+            .setTransactionExecutor { it.run() }
             .build()
 
     private fun fakePdfEngine(pageCount: Int): PdfPageEngine = object : PdfPageEngine {
@@ -215,7 +218,7 @@ class Module17ManualAuditAndBypassTest {
             )
             """.trimIndent(),
         )
-        sqlite.execSQL("CREATE INDEX IF NOT EXISTS index_pages_documentId ON pages(documentId)")
+        sqlite.execSQL("CREATE INDEX IF NOT EXISTS index_pages_documentId_originalPageNumber ON pages(documentId, originalPageNumber)")
         sqlite.execSQL(
             """
             CREATE TABLE IF NOT EXISTS ocr_results (
@@ -588,6 +591,7 @@ class Module17ManualAuditAndBypassTest {
 
         // Wait until Room Flow delivers activeDocument and pagesWithMissingContent
         composeRule.waitUntil(timeoutMillis = 5_000) {
+            ShadowLooper.idleMainLooper()
             viewModel.pagesWithMissingContent.value.size == 2
         }
         composeRule.waitForIdle()
@@ -615,6 +619,7 @@ class Module17ManualAuditAndBypassTest {
         // Click "إعادة استخراج" for page 1 -> spinner displays while deferred is awaited
         composeRule.onNodeWithTag("missing_content_reprocess_button_1").performClick()
         composeRule.waitUntil(timeoutMillis = 3_000) {
+            ShadowLooper.idleMainLooper()
             viewModel.reprocessingMissingPageIds.value.contains("${docId}_page_1")
         }
         composeRule.waitForIdle()
@@ -623,13 +628,18 @@ class Module17ManualAuditAndBypassTest {
         // Complete extraction -> page 1 removed from warning card and review items deleted
         extractionGate.complete(Unit)
         composeRule.waitUntil(timeoutMillis = 5_000) {
+            ShadowLooper.idleMainLooper()
             viewModel.pagesWithMissingContent.value.map { it.originalPageNumber } == listOf(3) &&
                 viewModel.reprocessingMissingPageIds.value.isEmpty()
         }
         composeRule.waitForIdle()
 
         composeRule.onNodeWithTag("missing_content_reprocess_button_1").assertDoesNotExist()
+        composeRule.onNodeWithTag("workspace_lazy_column")
+            .performScrollToNode(hasTestTag("missing_content_reprocess_button_3"))
         composeRule.onNodeWithTag("missing_content_reprocess_button_3").assertIsDisplayed()
+        composeRule.onNodeWithTag("workspace_lazy_column")
+            .performScrollToNode(hasTestTag("missing_content_audit_text"))
         composeRule.onNodeWithTag("missing_content_audit_text")
             .assertTextContains("تحذير: اكتشف Gemini أن النص مفقود في هذه الصفحات: [3]")
         runBlocking {

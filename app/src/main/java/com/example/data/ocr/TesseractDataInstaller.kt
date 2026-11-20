@@ -31,6 +31,7 @@ object TesseractDataInstaller {
     fun targetAraFile(context: Context): File =
         File(File(tessDataParentDir(context), TESSDATA_DIR_NAME), ARA_TRAINEDDATA)
 
+    @Synchronized
     fun ensureArabicTrainedData(context: Context): TrainedDataInstallResult {
         val tessDir = File(tessDataParentDir(context), TESSDATA_DIR_NAME)
         val targetFile = File(tessDir, ARA_TRAINEDDATA)
