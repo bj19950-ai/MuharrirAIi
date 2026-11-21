@@ -434,6 +434,7 @@ class Module05ComparisonTest {
                 MuharrirDatabase.MIGRATION_4_5,
                 MuharrirDatabase.MIGRATION_5_6,
                 MuharrirDatabase.MIGRATION_6_7,
+                MuharrirDatabase.MIGRATION_7_8,
             )
             .allowMainThreadQueries()
             .build()

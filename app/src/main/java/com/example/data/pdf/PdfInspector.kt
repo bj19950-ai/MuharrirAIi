@@ -11,6 +11,7 @@ import android.net.Uri
 import android.os.ParcelFileDescriptor
 import android.provider.OpenableColumns
 import android.util.LruCache
+import com.example.data.storage.PersistableUriPermissionManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
@@ -168,14 +169,7 @@ object PdfInspector {
         uri: Uri,
     ): PdfInspectionResult = withContext(Dispatchers.IO) {
         val resolver = context.contentResolver
-        try {
-            resolver.takePersistableUriPermission(
-                uri,
-                Intent.FLAG_GRANT_READ_URI_PERMISSION,
-            )
-        } catch (_: SecurityException) {
-        } catch (_: UnsupportedOperationException) {
-        }
+        PersistableUriPermissionManager.takePersistableReadPermission(resolver, uri)
 
         val meta = querySourceMetadata(context, uri)
         val headerBuffer = ByteArray(PDF_MAGIC.size)
@@ -313,11 +307,19 @@ object PdfInspector {
         }
 
         val localFile = File(sourceRef)
-        val bitmap = if (localFile.exists() && localFile.isFile) {
+        val rawBitmap = if (localFile.exists() && localFile.isFile) {
             pageEngine.renderFromFile(localFile, pageIndex, maxWidthPx)
         } else {
             val uri = runCatching { Uri.parse(sourceRef) }.getOrNull() ?: return@withContext null
             renderFromUri(context, uri, pageIndex, maxWidthPx)
+        }
+
+        val bitmap = rawBitmap?.let {
+            BitmapSafety.downsampleToMaxDimension(
+                bitmap = it,
+                maxDimensionPx = BitmapSafety.MAX_RENDER_DIMENSION_PX,
+                recycleOriginal = true,
+            )
         }
 
         if (bitmap != null) {
@@ -415,11 +417,17 @@ object PdfInspector {
         maxWidthPx: Int,
     ): Bitmap {
         renderer.openPage(pageIndex).use { page ->
-            val targetWidth = page.width.coerceAtLeast(1).let { w ->
-                if (w > maxWidthPx) maxWidthPx else (w * 2).coerceAtMost(maxWidthPx)
+            val cappedMaxWidth = maxWidthPx.coerceIn(1, BitmapSafety.MAX_RENDER_DIMENSION_PX)
+            val initialWidth = page.width.coerceAtLeast(1).let { w ->
+                if (w > cappedMaxWidth) cappedMaxWidth else (w * 2).coerceAtMost(cappedMaxWidth)
             }
-            val scale = targetWidth.toFloat() / page.width.coerceAtLeast(1).toFloat()
-            val targetHeight = (page.height * scale).toInt().coerceAtLeast(1)
+            val scale = initialWidth.toFloat() / page.width.coerceAtLeast(1).toFloat()
+            val initialHeight = (page.height * scale).toInt().coerceAtLeast(1)
+            val (targetWidth, targetHeight) = BitmapSafety.calculateProportionalTargetSize(
+                width = initialWidth,
+                height = initialHeight,
+                maxDimensionPx = BitmapSafety.MAX_RENDER_DIMENSION_PX,
+            )
             val bitmap = Bitmap.createBitmap(targetWidth, targetHeight, Bitmap.Config.ARGB_8888)
             val canvas = Canvas(bitmap)
             canvas.drawColor(Color.WHITE)

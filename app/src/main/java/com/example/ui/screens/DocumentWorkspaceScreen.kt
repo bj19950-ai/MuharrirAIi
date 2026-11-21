@@ -1,6 +1,11 @@
 package com.example.ui.screens
 
+import android.Manifest
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import android.os.Build
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -84,6 +89,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
+import androidx.core.content.ContextCompat
 import com.example.domain.model.BackendConnectionState
 import com.example.domain.model.DocumentRecord
 import com.example.domain.model.ExportMode
@@ -164,6 +170,27 @@ fun DocumentWorkspaceScreen(
     val context = LocalContext.current
     var showOriginalPdfViewer by remember(document?.id) { mutableStateOf(true) }
     var showDeleteConfirmation by remember(document?.id) { mutableStateOf(false) }
+    var pendingNotificationAction by remember { mutableStateOf<(() -> Unit)?>(null) }
+
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission(),
+    ) {
+        val action = pendingNotificationAction
+        pendingNotificationAction = null
+        action?.invoke()
+    }
+
+    val runWithNotificationPermission: (() -> Unit) -> Unit = { action ->
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            pendingNotificationAction = action
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        } else {
+            action()
+        }
+    }
 
     LaunchedEffect(document?.id, showOriginalPdfViewer) {
         if (document != null &&
@@ -322,7 +349,11 @@ fun DocumentWorkspaceScreen(
                         suspiciousPages = suspiciousPages,
                         suspiciousFixState = suspiciousFixState,
                         isAnyProcessingRunning = ocrState.isRunning || geminiState.isRunning || suspiciousFixState.isRunning,
-                        onFixAutomatically = { onFixSuspiciousPagesWithGemini(document.id) },
+                        onFixAutomatically = {
+                            runWithNotificationPermission {
+                                onFixSuspiciousPagesWithGemini(document.id)
+                            }
+                        },
                     )
                 }
             }
@@ -381,10 +412,16 @@ fun DocumentWorkspaceScreen(
                         pagesNeedingReprocessingCount = pagesNeedingReprocessingCount,
                         onSelectOcrEngine = onSelectOcrEngine,
                         onStartOrResume = { startPage, endPage ->
-                            onStartOrResumeOcr(context, document.id, startPage, endPage)
+                            runWithNotificationPermission {
+                                onStartOrResumeOcr(context, document.id, startPage, endPage)
+                            }
                         },
                         onPause = onPauseOcr,
-                        onReprocessFailedPages = { onReprocessFailedPages(context, document.id) },
+                        onReprocessFailedPages = {
+                            runWithNotificationPermission {
+                                onReprocessFailedPages(context, document.id)
+                            }
+                        },
                     )
                 }
 
@@ -429,10 +466,14 @@ fun DocumentWorkspaceScreen(
                         geminiKeys = geminiKeys,
                         usageStats = geminiUsageStats,
                         onStartAllPending = { startPage, endPage ->
-                            onStartGeminiAnalysis(document.id, null, startPage, endPage)
+                            runWithNotificationPermission {
+                                onStartGeminiAnalysis(document.id, null, startPage, endPage)
+                            }
                         },
                         onAnalyzeSelectedPage = { pageId ->
-                            onStartGeminiAnalysis(document.id, pageId, null, null)
+                            runWithNotificationPermission {
+                                onStartGeminiAnalysis(document.id, pageId, null, null)
+                            }
                         },
                         onPause = onPauseGeminiAnalysis,
                         onOpenSettings = onOpenSettings,
@@ -470,7 +511,9 @@ fun DocumentWorkspaceScreen(
                     selectedPageIndex = previewPageIndex,
                     isOcrRunning = ocrState.isRunning,
                     onRetrySinglePage = { pageId ->
-                        onRetrySingleOcrPage(context, document.id, pageId)
+                        runWithNotificationPermission {
+                            onRetrySingleOcrPage(context, document.id, pageId)
+                        }
                     },
                 )
             }

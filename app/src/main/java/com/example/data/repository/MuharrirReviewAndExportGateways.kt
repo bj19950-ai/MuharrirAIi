@@ -4,6 +4,7 @@ import android.graphics.Bitmap
 import com.example.data.local.MuharrirDatabase
 import com.example.data.local.OcrSegmentsJsonCodec
 import com.example.data.local.ReviewItemEntity
+import com.example.data.pdf.BitmapSafety
 import com.example.data.pdf.PdfPageEngine
 import com.example.data.storage.PrivateDocumentStorage
 import com.example.domain.model.ComparisonCategory
@@ -294,7 +295,13 @@ class MuharrirPageBitmapSource(
                 pdfFile = privateFile,
                 pageIndex = (pageNumber - 1).coerceAtLeast(0),
                 maxWidthPx = targetWidthPx,
-            )
+            )?.let { rendered ->
+                BitmapSafety.downsampleToMaxDimension(
+                    bitmap = rendered,
+                    maxDimensionPx = BitmapSafety.MAX_RENDER_DIMENSION_PX,
+                    recycleOriginal = true,
+                )
+            }
         }
 }
 

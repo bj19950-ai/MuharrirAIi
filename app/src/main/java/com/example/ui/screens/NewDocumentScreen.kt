@@ -58,6 +58,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.example.data.storage.PersistableUriPermissionManager
 import com.example.ui.components.ScholarlyInfoBanner
 import com.example.ui.components.SectionHeader
 import com.example.ui.components.formatFileSizeArabic
@@ -81,6 +82,10 @@ fun NewDocumentScreen(
         contract = ActivityResultContracts.OpenDocument(),
     ) { uri ->
         if (uri != null) {
+            PersistableUriPermissionManager.takePersistableReadPermission(
+                contentResolver = context.contentResolver,
+                uri = uri,
+            )
             onPdfPicked(context, uri)
         }
     }

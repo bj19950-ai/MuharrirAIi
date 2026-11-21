@@ -17,7 +17,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         PreferencesEntity::class,
         ApiKeySlotEntity::class,
     ],
-    version = 7,
+    version = 8,
     exportSchema = false,
 )
 abstract class MuharrirDatabase : RoomDatabase() {
@@ -159,6 +159,12 @@ abstract class MuharrirDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_7_8 = object : Migration(7, 8) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE documents ADD COLUMN sourceUri TEXT")
+            }
+        }
+
         fun getInstance(context: Context): MuharrirDatabase {
             return instance ?: synchronized(this) {
                 instance ?: Room.databaseBuilder(
@@ -173,6 +179,7 @@ abstract class MuharrirDatabase : RoomDatabase() {
                         MIGRATION_4_5,
                         MIGRATION_5_6,
                         MIGRATION_6_7,
+                        MIGRATION_7_8,
                     )
                     .build()
                     .also { instance = it }

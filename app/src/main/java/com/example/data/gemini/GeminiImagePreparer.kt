@@ -44,6 +44,7 @@ object GeminiImagePreparer {
             Bitmap.createScaledBitmap(source, targetW, targetH, true)
         } else {
             source.copy(Bitmap.Config.ARGB_8888, false)
+                ?: Bitmap.createScaledBitmap(source, srcW, srcH, true)
         }
 
         val qualitySteps = intArrayOf(85, 72, 60, 48)

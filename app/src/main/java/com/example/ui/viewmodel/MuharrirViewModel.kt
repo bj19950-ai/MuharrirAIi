@@ -9,10 +9,9 @@ import androidx.lifecycle.viewModelScope
 import com.example.data.gemini.GeminiKeyTestOutcome
 import com.example.data.pdf.PdfInspectionResult
 import com.example.data.pdf.PdfInspector
-import com.example.data.repository.GeminiRunOutcome
 import com.example.data.repository.ImportOutcome
 import com.example.data.repository.MuharrirRepository
-import com.example.data.repository.OcrRunOutcome
+import com.example.data.storage.PersistableUriPermissionManager
 import com.example.domain.model.ApiKeyMetadata
 import com.example.domain.model.BackendConnectionState
 import com.example.domain.model.DocumentRecord
@@ -29,6 +28,8 @@ import com.example.domain.model.PipelineStageInfo
 import com.example.domain.model.ProcessingPreferences
 import com.example.domain.ocr.OcrAvailabilityResult
 import com.example.review.model.SmartReviewPreferencesStore
+import com.example.service.ProcessingForegroundService
+import com.example.service.ProcessingStateBridge
 import com.example.ui.theme.AppThemePalette
 import com.example.ui.theme.AppearanceMode
 import com.example.ui.theme.AppearancePreferences
@@ -174,20 +175,16 @@ class MuharrirViewModel(
     private val _pageThumbnails = MutableStateFlow<Map<Int, Bitmap>>(emptyMap())
     val pageThumbnails: StateFlow<Map<Int, Bitmap>> = _pageThumbnails.asStateFlow()
 
-    private val _workspaceNoticeAr = MutableStateFlow<String?>(null)
-    val workspaceNoticeAr: StateFlow<String?> = _workspaceNoticeAr.asStateFlow()
+    val workspaceNoticeAr: StateFlow<String?> = ProcessingStateBridge.workspaceNoticeAr
 
     private val _settingsNoticeAr = MutableStateFlow<String?>(null)
     val settingsNoticeAr: StateFlow<String?> = _settingsNoticeAr.asStateFlow()
 
-    private val _ocrExecutionState = MutableStateFlow(OcrExecutionUiState())
-    val ocrExecutionState: StateFlow<OcrExecutionUiState> = _ocrExecutionState.asStateFlow()
+    val ocrExecutionState: StateFlow<OcrExecutionUiState> = ProcessingStateBridge.ocrExecutionState
 
-    private val _geminiExecutionState = MutableStateFlow(GeminiExecutionUiState())
-    val geminiExecutionState: StateFlow<GeminiExecutionUiState> = _geminiExecutionState.asStateFlow()
+    val geminiExecutionState: StateFlow<GeminiExecutionUiState> = ProcessingStateBridge.geminiExecutionState
 
-    private val _suspiciousFixState = MutableStateFlow(SuspiciousFixUiState())
-    val suspiciousFixState: StateFlow<SuspiciousFixUiState> = _suspiciousFixState.asStateFlow()
+    val suspiciousFixState: StateFlow<SuspiciousFixUiState> = ProcessingStateBridge.suspiciousFixState
 
     private val _reprocessingMissingPageIds = MutableStateFlow<Set<String>>(emptySet())
     val reprocessingMissingPageIds: StateFlow<Set<String>> = _reprocessingMissingPageIds.asStateFlow()
@@ -195,7 +192,7 @@ class MuharrirViewModel(
     private val _retryingPageIds = MutableStateFlow<Set<Int>>(emptySet())
     val retryingPageIds: StateFlow<Set<Int>> = _retryingPageIds.asStateFlow()
 
-    private val suspiciousRefreshTrigger = MutableStateFlow(0)
+    private val suspiciousRefreshTrigger: StateFlow<Int> = ProcessingStateBridge.suspiciousRefreshTrigger
 
     private val _documentPageRanges = MutableStateFlow<Map<String, IntRange>>(emptyMap())
     val documentPageRanges: StateFlow<Map<String, IntRange>> = _documentPageRanges.asStateFlow()
@@ -204,9 +201,6 @@ class MuharrirViewModel(
     val testingKeyId: StateFlow<String?> = _testingKeyId.asStateFlow()
 
     private var activeImportJob: Job? = null
-    private var activeOcrJob: Job? = null
-    private var activeGeminiJob: Job? = null
-    private var activeSuspiciousFixJob: Job? = null
 
     val preferences: StateFlow<ProcessingPreferences> = repository.preferences
         .stateIn(
@@ -320,7 +314,7 @@ class MuharrirViewModel(
 
     val suspiciousPages: StateFlow<List<PageRecord>> = combine(
         activeDocument,
-        _ocrExecutionState,
+        ocrExecutionState,
         suspiciousRefreshTrigger,
     ) { doc, ocrState, _ ->
         val isOcrRunningOnDoc = doc != null && ocrState.isRunning && ocrState.activeDocumentId == doc.id
@@ -369,6 +363,7 @@ class MuharrirViewModel(
         )
 
     init {
+        ProcessingStateBridge.setRepositoryProvider { repository }
         viewModelScope.launch {
             repository.prepareTesseractAssets(getApplication())
             repository.recoverInterruptedImports()
@@ -381,12 +376,10 @@ class MuharrirViewModel(
                     context = getApplication(),
                     engineType = prefs.preferredOcrEngine,
                 )
-                _ocrExecutionState.update {
-                    it.copy(
-                        activeEngine = prefs.preferredOcrEngine,
-                        availability = availability,
-                    )
-                }
+                ProcessingStateBridge.updateOcrAvailability(
+                    engineType = prefs.preferredOcrEngine,
+                    availability = availability,
+                )
             }
         }
     }
@@ -401,7 +394,7 @@ class MuharrirViewModel(
             _workspacePreviewPage.value = 0
             _workspacePreviewBitmap.value = null
             _pageThumbnails.value = emptyMap()
-            _workspaceNoticeAr.value = null
+            ProcessingStateBridge.setWorkspaceNotice(null)
         }
     }
 
@@ -421,6 +414,7 @@ class MuharrirViewModel(
 
     fun onPdfSelected(context: Context, uri: Uri) {
         val appContext = context.applicationContext
+        PersistableUriPermissionManager.takePersistableReadPermission(appContext.contentResolver, uri)
         val replaceId = _newDocState.value.replaceDocumentId
         val replaceName = _newDocState.value.replaceDocumentName
         _newDocState.value = NewDocumentUiState(
@@ -607,11 +601,13 @@ class MuharrirViewModel(
                     } else {
                         "."
                     }
-                    _workspaceNoticeAr.value = if (replaceId != null) {
-                        "تم استبدال ملف PDF وحفظ النسخة الجديدة وفهرسة $total صفحة$rangeNote"
-                    } else {
-                        "تم استيراد المستند وحفظه في التخزين الخاص للتطبيق ($total صفحة)$rangeNote"
-                    }
+                    ProcessingStateBridge.setWorkspaceNotice(
+                        if (replaceId != null) {
+                            "تم استبدال ملف PDF وحفظ النسخة الجديدة وفهرسة $total صفحة$rangeNote"
+                        } else {
+                            "تم استيراد المستند وحفظه في التخزين الخاص للتطبيق ($total صفحة)$rangeNote"
+                        },
+                    )
                     _newDocState.value = NewDocumentUiState()
                     onImported(outcome.document)
                 }
@@ -723,10 +719,11 @@ class MuharrirViewModel(
     }
 
     fun pauseOcr() {
-        activeOcrJob?.cancel()
-        activeOcrJob = null
-        _ocrExecutionState.update { it.copy(isRunning = false) }
-        _workspaceNoticeAr.value = "تم إيقاف استخراج النص مؤقتاً. الصفحات المكتملة محفوظة ويمكنك الاستئناف لاحقاً."
+        ProcessingForegroundService.cancel(getApplication())
+        ProcessingStateBridge.markAllStopped()
+        ProcessingStateBridge.setWorkspaceNotice(
+            "تم إيقاف استخراج النص مؤقتاً. الصفحات المكتملة محفوظة ويمكنك الاستئناف لاحقاً.",
+        )
     }
 
     private fun launchOcrJob(
@@ -738,81 +735,26 @@ class MuharrirViewModel(
         endPage: Int = Int.MAX_VALUE,
         reprocessFailedAndShortOnly: Boolean = false,
     ) {
-        if (_ocrExecutionState.value.isRunning) return
+        if (ocrExecutionState.value.isRunning || geminiExecutionState.value.isRunning || suspiciousFixState.value.isRunning) {
+            return
+        }
         val appContext = context.applicationContext
         val engineType = preferences.value.preferredOcrEngine
-
-        activeOcrJob = viewModelScope.launch {
-            val freshAvailability = repository.checkOcrEngineAvailability(appContext, engineType)
-            _ocrExecutionState.update {
-                it.copy(
-                    activeEngine = engineType,
-                    availability = freshAvailability,
-                )
-            }
-            if (freshAvailability is OcrAvailabilityResult.Unavailable) {
-                _workspaceNoticeAr.value = freshAvailability.reasonAr
-                return@launch
-            }
-
-            _ocrExecutionState.update {
-                it.copy(
-                    isRunning = true,
-                    activeDocumentId = documentId,
-                    currentPageNumber = 0,
-                    activeEngine = engineType,
-                )
-            }
-            val outcome = repository.runDocumentOcr(
-                context = appContext,
-                documentId = documentId,
-                engineType = engineType,
-                retryFailedOnly = retryFailedOnly,
-                singlePageId = singlePageId,
-                startPage = startPage,
-                endPage = endPage,
-                reprocessFailedAndShortOnly = reprocessFailedAndShortOnly,
-                onProgress = { progress ->
-                    _ocrExecutionState.update {
-                        it.copy(
-                            isRunning = true,
-                            activeDocumentId = progress.documentId,
-                            currentPageNumber = progress.currentPageNumber,
-                            completedPages = progress.completedPages,
-                            failedPages = progress.failedPages,
-                            totalPages = progress.totalPages,
-                            activeEngine = progress.engineType,
-                        )
-                    }
-                },
-            )
-            _ocrExecutionState.update { it.copy(isRunning = false) }
-            when (outcome) {
-                is OcrRunOutcome.Completed -> {
-                    _workspaceNoticeAr.value = when {
-                        reprocessFailedAndShortOnly && outcome.processedNow == 0 ->
-                            "لا توجد صفحات فاشلة أو ذات نص ناقص تحتاج لإعادة المعالجة."
-                        reprocessFailedAndShortOnly ->
-                            "أُعيدت معالجة ${outcome.processedNow} صفحة؛ الإجمالي المكتمل الآن ${outcome.totalDonePages} من ${outcome.totalPages}."
-                        outcome.processedNow == 0 && outcome.totalFailedPages > 0 ->
-                            "لا توجد صفحات معلّقة في النطاق المحدد؛ يوجد ${outcome.totalFailedPages} صفحة فاشلة يمكنك إعادة معالجتها."
-                        outcome.processedNow == 0 ->
-                            "جميع صفحات النطاق المحدد (${outcome.totalDonePages} من ${outcome.totalPages}) مكتملة الاستخراج بالفعل."
-                        outcome.totalFailedPages > 0 ->
-                            "اكتمل استخراج ${outcome.totalDonePages} من ${outcome.totalPages} صفحة، وفشلت ${outcome.totalFailedPages} صفحة."
-                        else ->
-                            "تم استخراج وحفظ نتائج ${outcome.totalDonePages} من ${outcome.totalPages} صفحة بنجاح عبر ${engineType.displayNameAr}."
-                    }
-                }
-                is OcrRunOutcome.Failure -> {
-                    _workspaceNoticeAr.value = outcome.reasonAr
-                }
-            }
-        }
+        ProcessingStateBridge.setRepositoryProvider { repository }
+        ProcessingForegroundService.startOcr(
+            context = appContext,
+            documentId = documentId,
+            engineType = engineType,
+            retryFailedOnly = retryFailedOnly,
+            singlePageId = singlePageId,
+            startPage = startPage,
+            endPage = endPage,
+            reprocessShortOnly = reprocessFailedAndShortOnly,
+        )
     }
 
     fun dismissWorkspaceNotice() {
-        _workspaceNoticeAr.value = null
+        ProcessingStateBridge.setWorkspaceNotice(null)
     }
 
     fun setOcrEngine(engine: OcrEngineType) {
@@ -899,89 +841,40 @@ class MuharrirViewModel(
         startPage: Int? = null,
         endPage: Int? = null,
     ) {
-        if (_geminiExecutionState.value.isRunning) return
+        if (geminiExecutionState.value.isRunning || ocrExecutionState.value.isRunning || suspiciousFixState.value.isRunning) {
+            return
+        }
         val storedRange = _documentPageRanges.value[documentId]
         val effectiveStart = (startPage ?: storedRange?.first ?: 1).coerceAtLeast(1)
         val effectiveEnd = (endPage ?: storedRange?.last ?: Int.MAX_VALUE).coerceAtLeast(effectiveStart)
         if (startPage != null && endPage != null) {
             _documentPageRanges.update { it + (documentId to (effectiveStart..effectiveEnd)) }
         }
-        activeGeminiJob = viewModelScope.launch {
-            _geminiExecutionState.value = GeminiExecutionUiState(
-                isRunning = true,
-                activeDocumentId = documentId,
-            )
-            when (
-                val outcome = repository.runGeminiAnalysis(
-                    documentId = documentId,
-                    singlePageId = singlePageId,
-                    startPage = effectiveStart,
-                    endPage = effectiveEnd,
-                    onProgress = { progress ->
-                        _geminiExecutionState.value = GeminiExecutionUiState(
-                            isRunning = true,
-                            activeDocumentId = progress.documentId,
-                            currentPageNumber = progress.currentPageNumber,
-                            analyzedPages = progress.analyzedPages,
-                            failedPages = progress.failedPages,
-                            totalTargetPages = progress.totalTargetPages,
-                        )
-                    },
-                )
-            ) {
-                is GeminiRunOutcome.Completed -> {
-                    _workspaceNoticeAr.value = outcome.lastMessageAr
-                }
-                is GeminiRunOutcome.Failure -> {
-                    _workspaceNoticeAr.value = outcome.reasonAr
-                }
-            }
-            _geminiExecutionState.update { it.copy(isRunning = false) }
-        }
+        ProcessingStateBridge.setRepositoryProvider { repository }
+        ProcessingForegroundService.startGemini(
+            context = getApplication(),
+            documentId = documentId,
+            singlePageId = singlePageId,
+            startPage = effectiveStart,
+            endPage = effectiveEnd,
+        )
     }
 
     fun pauseGeminiAnalysis() {
-        activeGeminiJob?.cancel()
-        activeGeminiJob = null
-        _geminiExecutionState.update { it.copy(isRunning = false) }
-        _workspaceNoticeAr.value = "تم إيقاف تحليل Gemini مؤقتاً. النتائج المكتملة محفوظة محلياً."
+        ProcessingForegroundService.cancel(getApplication())
+        ProcessingStateBridge.markAllStopped()
+        ProcessingStateBridge.setWorkspaceNotice("تم إيقاف تحليل Gemini مؤقتاً. النتائج المكتملة محفوظة محلياً.")
     }
 
     fun fixSuspiciousPagesWithGemini(documentId: String) {
-        if (_suspiciousFixState.value.isRunning || _geminiExecutionState.value.isRunning || _ocrExecutionState.value.isRunning) {
+        if (suspiciousFixState.value.isRunning || geminiExecutionState.value.isRunning || ocrExecutionState.value.isRunning) {
             return
         }
-        activeSuspiciousFixJob?.cancel()
-        activeSuspiciousFixJob = viewModelScope.launch {
-            _suspiciousFixState.value = SuspiciousFixUiState(
-                isRunning = true,
-                activeDocumentId = documentId,
-            )
-            when (
-                val outcome = repository.fixSuspiciousPagesWithGemini(
-                    documentId = documentId,
-                    onProgress = { progress ->
-                        _suspiciousFixState.value = SuspiciousFixUiState(
-                            isRunning = true,
-                            activeDocumentId = progress.documentId,
-                            currentPageNumber = progress.currentPageNumber,
-                            fixedPages = progress.analyzedPages,
-                            failedPages = progress.failedPages,
-                            totalSuspiciousPages = progress.totalTargetPages,
-                        )
-                    },
-                )
-            ) {
-                is GeminiRunOutcome.Completed -> {
-                    _workspaceNoticeAr.value = outcome.lastMessageAr
-                }
-                is GeminiRunOutcome.Failure -> {
-                    _workspaceNoticeAr.value = outcome.reasonAr
-                }
-            }
-            _suspiciousFixState.update { it.copy(isRunning = false) }
-            suspiciousRefreshTrigger.update { it + 1 }
-        }
+        ProcessingStateBridge.setRepositoryProvider { repository }
+        ProcessingForegroundService.startSuspiciousFix(
+            context = getApplication(),
+            documentId = documentId,
+        )
     }
 
     fun forceGeminiExtractionForPage(documentId: String, pageNumber: Int) {
@@ -1000,17 +893,19 @@ class MuharrirViewModel(
                 val result = repository.forceGeminiExtractionForPage(documentId, pageNumber)
                 result.fold(
                     onSuccess = {
-                        _workspaceNoticeAr.value =
-                            "تمت إعادة استخراج نص صفحة $pageNumber بالكامل عبر Gemini واعتمادها مباشرة دون إضافتها لطابور المراجعة."
+                        ProcessingStateBridge.setWorkspaceNotice(
+                            "تمت إعادة استخراج نص صفحة $pageNumber بالكامل عبر Gemini واعتمادها مباشرة دون إضافتها لطابور المراجعة.",
+                        )
                     },
                     onFailure = { err ->
-                        _workspaceNoticeAr.value =
-                            err.message ?: "تعذرت إعادة استخراج صفحة $pageNumber عبر Gemini."
+                        ProcessingStateBridge.setWorkspaceNotice(
+                            err.message ?: "تعذرت إعادة استخراج صفحة $pageNumber عبر Gemini.",
+                        )
                     },
                 )
             } finally {
                 _reprocessingMissingPageIds.update { it - pageId }
-                suspiciousRefreshTrigger.update { it + 1 }
+                ProcessingStateBridge.incrementSuspiciousRefreshTrigger()
             }
         }
     }
@@ -1020,12 +915,14 @@ class MuharrirViewModel(
             val result = repository.skipPageAnalysis(documentId, pageNumber)
             result.fold(
                 onSuccess = {
-                    _workspaceNoticeAr.value =
-                        "تم تخطي تحليل صفحة $pageNumber عبر Gemini مع الإبقاء على نص OCR وعناصر المراجعة الحالية."
+                    ProcessingStateBridge.setWorkspaceNotice(
+                        "تم تخطي تحليل صفحة $pageNumber عبر Gemini مع الإبقاء على نص OCR وعناصر المراجعة الحالية.",
+                    )
                 },
                 onFailure = { err ->
-                    _workspaceNoticeAr.value =
-                        err.message ?: "تعذر تخطي صفحة $pageNumber."
+                    ProcessingStateBridge.setWorkspaceNotice(
+                        err.message ?: "تعذر تخطي صفحة $pageNumber.",
+                    )
                 },
             )
         }
@@ -1039,17 +936,19 @@ class MuharrirViewModel(
                 val result = repository.retryPageAnalysis(documentId, pageNumber)
                 result.fold(
                     onSuccess = {
-                        _workspaceNoticeAr.value =
-                            "تمت إعادة تحليل صفحة $pageNumber عبر Gemini بنجاح."
+                        ProcessingStateBridge.setWorkspaceNotice(
+                            "تمت إعادة تحليل صفحة $pageNumber عبر Gemini بنجاح.",
+                        )
                     },
                     onFailure = { err ->
-                        _workspaceNoticeAr.value =
-                            err.message ?: "تعذرت إعادة تحليل صفحة $pageNumber عبر Gemini."
+                        ProcessingStateBridge.setWorkspaceNotice(
+                            err.message ?: "تعذرت إعادة تحليل صفحة $pageNumber عبر Gemini.",
+                        )
                     },
                 )
             } finally {
                 _retryingPageIds.update { it - pageNumber }
-                suspiciousRefreshTrigger.update { it + 1 }
+                ProcessingStateBridge.incrementSuspiciousRefreshTrigger()
             }
         }
     }
@@ -1076,15 +975,17 @@ class MuharrirViewModel(
                     _retryingPageIds.update { it - pageNumber }
                 }
             }
-            suspiciousRefreshTrigger.update { it + 1 }
-            _workspaceNoticeAr.value = when {
-                succeeded > 0 && failed == 0 ->
-                    "تمت إعادة تحليل جميع الصفحات المتعثرة ($succeeded) بنجاح."
-                succeeded > 0 && failed > 0 ->
-                    "تمت إعادة تحليل $succeeded صفحة بنجاح، ولا تزال $failed صفحة متعثرة."
-                else ->
-                    "تعذرت إعادة تحليل الصفحات المتعثرة ($failed صفحة)."
-            }
+            ProcessingStateBridge.incrementSuspiciousRefreshTrigger()
+            ProcessingStateBridge.setWorkspaceNotice(
+                when {
+                    succeeded > 0 && failed == 0 ->
+                        "تمت إعادة تحليل جميع الصفحات المتعثرة ($succeeded) بنجاح."
+                    succeeded > 0 && failed > 0 ->
+                        "تمت إعادة تحليل $succeeded صفحة بنجاح، ولا تزال $failed صفحة متعثرة."
+                    else ->
+                        "تعذرت إعادة تحليل الصفحات المتعثرة ($failed صفحة)."
+                },
+            )
         }
     }
 

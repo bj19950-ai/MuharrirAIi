@@ -80,6 +80,7 @@ class WordExportViewModel(
     }
 
     fun requestExport(documentId: String) {
+        if (_uiState.value.isExporting) return
         _uiState.update { it.copy(errorMessage = null, statusMessage = null) }
         viewModelScope.launch {
             val summary = loadWarningSummaryIfEnabled(documentId)
@@ -110,6 +111,7 @@ class WordExportViewModel(
         documentTitle: String,
         fallbackMode: WordExportMode,
     ) {
+        if (_uiState.value.isExporting) return
         val file = File(filePath)
         if (!file.exists() || !file.isFile) {
             _uiState.update {
@@ -194,16 +196,23 @@ class WordExportViewModel(
         includeWarnings: Boolean = _uiState.value.pendingIncludeWarnings,
     ) {
         val appContext = context.applicationContext
-        _uiState.update {
-            it.copy(
-                isModeDialogVisible = false,
-                warningDialogState = null,
-                pendingIncludeWarnings = false,
-                isExporting = true,
-                errorMessage = null,
-                statusMessage = null,
-            )
+        var started = false
+        _uiState.update { current ->
+            if (current.isExporting) {
+                current
+            } else {
+                started = true
+                current.copy(
+                    isModeDialogVisible = false,
+                    warningDialogState = null,
+                    pendingIncludeWarnings = false,
+                    isExporting = true,
+                    errorMessage = null,
+                    statusMessage = null,
+                )
+            }
         }
+        if (!started) return
 
         viewModelScope.launch {
             try {
@@ -258,6 +267,7 @@ class WordExportViewModel(
                 }
                 _events.emit(WordExportEvent.ShareDocxFile(generatedFile, document.title))
             } catch (ce: CancellationException) {
+                _uiState.update { it.copy(isExporting = false) }
                 throw ce
             } catch (_: Exception) {
                 _uiState.update {

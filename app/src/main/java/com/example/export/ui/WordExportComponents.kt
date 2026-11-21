@@ -21,6 +21,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
@@ -119,6 +120,30 @@ fun WordExportSection(
                 }
             }
 
+            if (uiState.isExporting) {
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("export_loading_card"),
+                    shape = RoundedCornerShape(10.dp),
+                    color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary),
+                ) {
+                    Column(
+                        modifier = Modifier.padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Text(
+                            text = "جاري إنشاء وتنسيق ملف Word في الخلفية...",
+                            style = MaterialTheme.typography.bodySmall,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer,
+                        )
+                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                    }
+                }
+            }
+
             if (!isReviewApproved) {
                 Text(
                     text = "يتفعّل التصدير إلى Word بعد اعتماد المراجعة من شاشة ملخص المراجعة.",
@@ -183,6 +208,7 @@ fun WordExportSection(
                                     fallbackMode = exportedDocument.exportMode.toWordExportMode(),
                                 )
                             },
+                            enabled = !uiState.isExporting,
                             border = BorderStroke(1.dp, ext.success),
                             colors = ButtonDefaults.outlinedButtonColors(
                                 contentColor = ext.onSuccessContainer,

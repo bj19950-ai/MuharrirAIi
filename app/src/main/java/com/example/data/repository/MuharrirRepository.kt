@@ -25,11 +25,14 @@ import com.example.data.ocr.OcrImagePreprocessor
 import com.example.data.ocr.PageInspectionCacheStore
 import com.example.data.ocr.TesseractDataInstaller
 import com.example.data.ocr.TrainedDataInstallResult
+import android.os.ParcelFileDescriptor
 import com.example.data.pdf.AndroidPdfRendererEngine
+import com.example.data.pdf.BitmapSafety
 import com.example.data.pdf.PdfInspector
 import com.example.data.pdf.PdfPageEngine
 import com.example.data.pdf.PrivatePdfIndexResult
 import com.example.data.remote.BackendConnectionManager
+import com.example.data.storage.PersistableUriPermissionManager
 import com.example.data.storage.PrivateDocumentStorage
 import com.example.data.storage.StreamCopyResult
 import com.example.domain.model.ApiKeyMetadata
@@ -329,13 +332,28 @@ class MuharrirRepository(
 
         for ((idx, page) in suspiciousPages.withIndex()) {
             currentCoroutineContext().ensureActive()
+            onProgress(
+                GeminiExecutionProgress(
+                    documentId = documentId,
+                    currentPageNumber = page.originalPageNumber,
+                    analyzedPages = fixedNow,
+                    failedPages = failedCount,
+                    totalTargetPages = suspiciousPages.size,
+                ),
+            )
             var rawBitmap: Bitmap? = null
             try {
                 rawBitmap = pageEngine.renderFromFile(
                     pdfFile = privateFile,
                     pageIndex = (page.originalPageNumber - 1).coerceAtLeast(0),
                     maxWidthPx = 1600,
-                )
+                )?.let {
+                    BitmapSafety.downsampleToMaxDimension(
+                        bitmap = it,
+                        maxDimensionPx = BitmapSafety.MAX_RENDER_DIMENSION_PX,
+                        recycleOriginal = true,
+                    )
+                }
                 if (rawBitmap == null) {
                     failedCount++
                     lastErrorMsg = "تعذر تصيير صورة الصفحة ${page.originalPageNumber} لإرسالها إلى Gemini."
@@ -399,9 +417,7 @@ class MuharrirRepository(
                     )
                 }
             } finally {
-                if (rawBitmap != null && !rawBitmap.isRecycled) {
-                    rawBitmap.recycle()
-                }
+                BitmapSafety.recycleQuietly(rawBitmap)
             }
 
             onProgress(
@@ -493,7 +509,13 @@ class MuharrirRepository(
                 pdfFile = privateFile,
                 pageIndex = (pageNumber - 1).coerceAtLeast(0),
                 maxWidthPx = 1600,
-            )
+            )?.let {
+                BitmapSafety.downsampleToMaxDimension(
+                    bitmap = it,
+                    maxDimensionPx = BitmapSafety.MAX_RENDER_DIMENSION_PX,
+                    recycleOriginal = true,
+                )
+            }
             if (rawBitmap == null) {
                 return@withContext Result.failure(
                     IllegalStateException("تعذر تصيير صورة الصفحة $pageNumber لإرسالها إلى Gemini."),
@@ -563,9 +585,7 @@ class MuharrirRepository(
 
             Result.success(extractedText)
         } finally {
-            if (rawBitmap != null && !rawBitmap.isRecycled) {
-                rawBitmap.recycle()
-            }
+            BitmapSafety.recycleQuietly(rawBitmap)
         }
     }
 
@@ -679,6 +699,16 @@ class MuharrirRepository(
                         ocrErrorMessageAr = null,
                         ocrUpdatedAtMillis = System.currentTimeMillis(),
                     )
+                    onProgress(
+                        OcrExecutionProgress(
+                            documentId = documentId,
+                            currentPageNumber = page.originalPageNumber,
+                            completedPages = doneCount,
+                            failedPages = failedCount,
+                            totalPages = totalPages,
+                            engineType = engineType,
+                        ),
+                    )
 
                     var rawBitmap: Bitmap? = null
                     var prepared: OcrImagePreprocessor.PreparedOcrBitmap? = null
@@ -687,7 +717,13 @@ class MuharrirRepository(
                             pdfFile = privateFile,
                             pageIndex = (page.originalPageNumber - 1).coerceAtLeast(0),
                             maxWidthPx = 1600,
-                        )
+                        )?.let {
+                            BitmapSafety.downsampleToMaxDimension(
+                                bitmap = it,
+                                maxDimensionPx = BitmapSafety.MAX_RENDER_DIMENSION_PX,
+                                recycleOriginal = true,
+                            )
+                        }
                         if (rawBitmap == null) {
                             val errAr = "تعذر تصيير صفحة PDF رقم ${page.originalPageNumber} لمعالجتها بالـ OCR."
                             pageDao.updatePageOcrState(
@@ -776,9 +812,7 @@ class MuharrirRepository(
                         }
                     } finally {
                         prepared?.recycleSafely()
-                        if (rawBitmap != null && !rawBitmap.isRecycled) {
-                            rawBitmap.recycle()
-                        }
+                        BitmapSafety.recycleQuietly(rawBitmap)
                     }
 
                     processedInRun++
@@ -866,6 +900,9 @@ class MuharrirRepository(
         onProgress: suspend (ImportProgressUpdate) -> Unit = {},
     ): ImportOutcome = withContext(Dispatchers.IO) {
         val resolver = context.contentResolver
+        PersistableUriPermissionManager.takePersistableReadPermission(resolver, uri)
+        val sourceUriString = uri.toString()
+
         val isReplacement = replaceDocumentId != null
         val existingDoc = if (replaceDocumentId != null) {
             documentDao.getDocumentById(replaceDocumentId)
@@ -882,6 +919,7 @@ class MuharrirRepository(
                 id = documentId,
                 originalFileName = meta.fileName,
                 internalStoragePath = "",
+                sourceUri = sourceUriString,
                 fileSizeBytes = meta.declaredSizeBytes.coerceAtLeast(0L),
                 importDateMillis = now,
                 lastModifiedMillis = now,
@@ -1091,6 +1129,7 @@ class MuharrirRepository(
                     id = documentId,
                     originalFileName = meta.fileName,
                     internalStoragePath = finalPrivateFile.absolutePath,
+                    sourceUri = sourceUriString,
                     fileSizeBytes = copiedFileSize,
                     importDateMillis = existingDoc?.importDateMillis ?: now,
                     lastModifiedMillis = completedTime,
@@ -1121,6 +1160,21 @@ class MuharrirRepository(
                 )
             }
         }
+    }
+
+    suspend fun reopenOriginalPdfDescriptor(
+        context: Context,
+        documentId: String,
+    ): ParcelFileDescriptor? = withContext(Dispatchers.IO) {
+        val doc = documentDao.getDocumentById(documentId) ?: return@withContext null
+        val persistedUri = PersistableUriPermissionManager.openReadOnlyDescriptor(context, doc.sourceUri)
+        if (persistedUri != null) {
+            return@withContext persistedUri
+        }
+        val privateFile = storage.resolvePrivatePdfIfExists(doc.internalStoragePath) ?: return@withContext null
+        runCatching {
+            ParcelFileDescriptor.open(privateFile, ParcelFileDescriptor.MODE_READ_ONLY)
+        }.getOrNull()
     }
 
     suspend fun renderDocumentPage(
@@ -1280,13 +1334,28 @@ class MuharrirRepository(
         try {
             for ((idx, page) in targetPages.withIndex()) {
                 currentCoroutineContext().ensureActive()
+                onProgress(
+                    GeminiExecutionProgress(
+                        documentId = documentId,
+                        currentPageNumber = page.originalPageNumber,
+                        analyzedPages = alreadyAnalyzedCount + analyzedNow,
+                        failedPages = failedCount,
+                        totalTargetPages = targetPages.size,
+                    ),
+                )
                 var pageBitmap: Bitmap? = null
                 try {
                     pageBitmap = pageEngine.renderFromFile(
                         pdfFile = privateFile,
                         pageIndex = (page.originalPageNumber - 1).coerceAtLeast(0),
                         maxWidthPx = 1280,
-                    )
+                    )?.let {
+                        BitmapSafety.downsampleToMaxDimension(
+                            bitmap = it,
+                            maxDimensionPx = BitmapSafety.MAX_RENDER_DIMENSION_PX,
+                            recycleOriginal = true,
+                        )
+                    }
                     if (pageBitmap == null) {
                         failedCount++
                         lastErrorMsg = "تعذر تصيير صورة الصفحة ${page.originalPageNumber} لإرسالها إلى Gemini."
@@ -1348,9 +1417,7 @@ class MuharrirRepository(
                         failureReason = reasonCode,
                     )
                 } finally {
-                    if (pageBitmap != null && !pageBitmap.isRecycled) {
-                        pageBitmap.recycle()
-                    }
+                    BitmapSafety.recycleQuietly(pageBitmap)
                 }
 
                 val currentAnalyzedTotal = alreadyAnalyzedCount + analyzedNow
@@ -1494,7 +1561,13 @@ class MuharrirRepository(
                 pdfFile = privateFile,
                 pageIndex = (pageNumber - 1).coerceAtLeast(0),
                 maxWidthPx = 1280,
-            )
+            )?.let {
+                BitmapSafety.downsampleToMaxDimension(
+                    bitmap = it,
+                    maxDimensionPx = BitmapSafety.MAX_RENDER_DIMENSION_PX,
+                    recycleOriginal = true,
+                )
+            }
             if (pageBitmap == null) {
                 val msg = "تعذر تصيير صورة الصفحة $pageNumber لإعادة تحليلها عبر Gemini."
                 pageDao.updatePageFailureState(
@@ -1568,9 +1641,7 @@ class MuharrirRepository(
             )
             Result.failure(IllegalStateException(classified.arabicMessage))
         } finally {
-            if (pageBitmap != null && !pageBitmap.isRecycled) {
-                pageBitmap.recycle()
-            }
+            BitmapSafety.recycleQuietly(pageBitmap)
         }
     }
 
@@ -1732,7 +1803,13 @@ class MuharrirRepository(
                 pdfFile = privateFile,
                 pageIndex = (page.originalPageNumber - 1).coerceAtLeast(0),
                 maxWidthPx = 400,
-            )
+            )?.let {
+                BitmapSafety.downsampleToMaxDimension(
+                    bitmap = it,
+                    maxDimensionPx = BitmapSafety.MAX_RENDER_DIMENSION_PX,
+                    recycleOriginal = true,
+                )
+            }
             if (bitmap == null) {
                 false
             } else {
@@ -1743,9 +1820,7 @@ class MuharrirRepository(
         } catch (_: Exception) {
             false
         } finally {
-            if (bitmap != null && !bitmap.isRecycled) {
-                bitmap.recycle()
-            }
+            BitmapSafety.recycleQuietly(bitmap)
         }
     }
 

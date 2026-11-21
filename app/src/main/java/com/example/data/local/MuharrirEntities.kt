@@ -51,6 +51,7 @@ data class DocumentEntity(
     val exportedDocxPath: String? = null,
     val exportedMode: String? = null,
     val exportedAtMillis: Long? = null,
+    val sourceUri: String? = null,
 )
 
 @Entity(
@@ -282,7 +283,7 @@ fun DocumentEntity.toDomain(
         uploadDateMillis = importDateMillis,
         pageCount = pageCount,
         status = safeProcessingStatus,
-        originalFileRef = internalStoragePath,
+        originalFileRef = sourceUri?.takeIf { it.isNotBlank() } ?: internalStoragePath,
         isValidationPassed = isValidationPassed,
         validationNote = validationNote,
         internalStorageRef = internalStoragePath,

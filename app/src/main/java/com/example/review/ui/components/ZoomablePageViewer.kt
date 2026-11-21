@@ -115,7 +115,7 @@ fun ZoomablePageViewer(
                     }
                 }
 
-                isError || pageBitmap == null -> {
+                isError || pageBitmap == null || pageBitmap.isRecycled -> {
                     Column(
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -333,7 +333,7 @@ fun EnlargedCropCard(
                 color = MaterialTheme.colorScheme.onSurface,
             )
 
-            if (croppedBitmap == null) {
+            if (croppedBitmap == null || croppedBitmap.isRecycled) {
                 Text(
                     text = "المعاينة المكبّرة غير متوفرة لهذا الموضع.",
                     style = MaterialTheme.typography.bodySmall,

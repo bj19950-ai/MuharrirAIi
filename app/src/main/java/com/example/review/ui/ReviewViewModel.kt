@@ -4,6 +4,7 @@ import android.graphics.Bitmap
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.data.pdf.BitmapSafety
 import com.example.review.model.BoundingBox
 import com.example.review.model.DiscrepancyCategory
 import com.example.review.model.DocumentReviewGateway
@@ -46,7 +47,8 @@ class ReviewViewModel(
     )
     val uiState: StateFlow<ReviewUiState> = _uiState.asStateFlow()
 
-    private val pageBitmapCache = mutableMapOf<Int, Bitmap>()
+    private var cachedPageNumber: Int? = null
+    private var cachedPageBitmap: Bitmap? = null
     private var lastLoadedPageNumber: Int? = null
     private var lastCroppedKey: Pair<Long, Int>? = null
     private var bitmapJob: Job? = null
@@ -125,6 +127,7 @@ class ReviewViewModel(
                     } else {
                         lastLoadedPageNumber = null
                         lastCroppedKey = null
+                        val oldCrop = _uiState.value.enlargedCropBitmap
                         _uiState.update {
                             it.copy(
                                 pageBitmap = null,
@@ -132,6 +135,9 @@ class ReviewViewModel(
                                 isBitmapLoading = false,
                                 bitmapLoadError = false,
                             )
+                        }
+                        if (oldCrop != null && oldCrop !== cachedPageBitmap) {
+                            BitmapSafety.recycleQuietly(oldCrop)
                         }
                     }
                 }
@@ -191,24 +197,25 @@ class ReviewViewModel(
     }
 
     private fun ensureBitmapAndCrop(item: ReviewItemModel) {
-        val cachedBitmap = pageBitmapCache[item.pageNumber]
-        if (cachedBitmap != null) {
+        val currentCached = cachedPageBitmap?.takeIf { !it.isRecycled && cachedPageNumber == item.pageNumber }
+        if (currentCached != null) {
             if (lastLoadedPageNumber != item.pageNumber) {
                 lastLoadedPageNumber = item.pageNumber
                 _uiState.update {
                     it.copy(
-                        pageBitmap = cachedBitmap,
+                        pageBitmap = currentCached,
                         isBitmapLoading = false,
                         bitmapLoadError = false,
                     )
                 }
             }
-            updateCropFromBitmap(item, cachedBitmap)
+            updateCropFromBitmap(item, currentCached)
             return
         }
 
         bitmapJob?.cancel()
         bitmapJob = viewModelScope.launch {
+            val previousCropBeforeLoad = _uiState.value.enlargedCropBitmap
             _uiState.update {
                 it.copy(
                     isBitmapLoading = true,
@@ -216,15 +223,30 @@ class ReviewViewModel(
                     enlargedCropBitmap = null,
                 )
             }
+            if (previousCropBeforeLoad != null && previousCropBeforeLoad !== cachedPageBitmap) {
+                BitmapSafety.recycleQuietly(previousCropBeforeLoad)
+            }
+
             val loaded = withContext(ioDispatcher) {
                 runCatching { pageBitmapSource.loadPageBitmap(documentId, item.pageNumber) }
                     .getOrNull()
+                    ?.let { raw ->
+                        BitmapSafety.downsampleToMaxDimension(
+                            bitmap = raw,
+                            maxDimensionPx = BitmapSafety.MAX_RENDER_DIMENSION_PX,
+                            recycleOriginal = true,
+                        )
+                    }
             }
             if (loaded != null) {
-                pageBitmapCache[item.pageNumber] = loaded
+                val oldPageBitmap = cachedPageBitmap
+                cachedPageNumber = item.pageNumber
+                cachedPageBitmap = loaded
                 lastLoadedPageNumber = item.pageNumber
+
                 val crop = computeEnlargedCrop(loaded, item.bbox)
                 lastCroppedKey = item.id to item.pageNumber
+                val oldCrop = _uiState.value.enlargedCropBitmap
                 _uiState.update {
                     it.copy(
                         pageBitmap = loaded,
@@ -233,7 +255,17 @@ class ReviewViewModel(
                         bitmapLoadError = false,
                     )
                 }
+                if (oldCrop != null && oldCrop !== crop && oldCrop !== loaded) {
+                    BitmapSafety.recycleQuietly(oldCrop)
+                }
+                if (oldPageBitmap != null && oldPageBitmap !== loaded) {
+                    BitmapSafety.recycleQuietly(oldPageBitmap)
+                }
             } else {
+                val oldPageBitmap = cachedPageBitmap
+                cachedPageNumber = null
+                cachedPageBitmap = null
+                lastLoadedPageNumber = null
                 _uiState.update {
                     it.copy(
                         pageBitmap = null,
@@ -242,17 +274,24 @@ class ReviewViewModel(
                         bitmapLoadError = true,
                     )
                 }
+                if (oldPageBitmap != null) {
+                    BitmapSafety.recycleQuietly(oldPageBitmap)
+                }
             }
         }
     }
 
     private fun updateCropFromBitmap(item: ReviewItemModel, bitmap: Bitmap) {
         val cropKey = item.id to item.pageNumber
-        if (lastCroppedKey == cropKey && _uiState.value.enlargedCropBitmap != null) return
+        if (lastCroppedKey == cropKey && _uiState.value.enlargedCropBitmap?.isRecycled == false) return
         viewModelScope.launch {
             val crop = computeEnlargedCrop(bitmap, item.bbox)
             lastCroppedKey = cropKey
+            val oldCrop = _uiState.value.enlargedCropBitmap
             _uiState.update { it.copy(enlargedCropBitmap = crop) }
+            if (oldCrop != null && oldCrop !== crop && oldCrop !== bitmap) {
+                BitmapSafety.recycleQuietly(oldCrop)
+            }
         }
     }
 
@@ -424,7 +463,11 @@ class ReviewViewModel(
         if (item != null) {
             ensureBitmapAndCrop(item)
         } else {
+            val oldCrop = _uiState.value.enlargedCropBitmap
             _uiState.update { it.copy(pageBitmap = null, enlargedCropBitmap = null) }
+            if (oldCrop != null && oldCrop !== cachedPageBitmap) {
+                BitmapSafety.recycleQuietly(oldCrop)
+            }
         }
     }
 
@@ -888,6 +931,23 @@ class ReviewViewModel(
                 confirmationMessage = null,
             )
         }
+    }
+
+    override fun onCleared() {
+        bitmapJob?.cancel()
+        val crop = _uiState.value.enlargedCropBitmap
+        val activePage = _uiState.value.pageBitmap
+        _uiState.update { it.copy(pageBitmap = null, enlargedCropBitmap = null) }
+        if (crop != null && crop !== activePage && crop !== cachedPageBitmap) {
+            BitmapSafety.recycleQuietly(crop)
+        }
+        BitmapSafety.recycleQuietly(cachedPageBitmap)
+        if (activePage != null && activePage !== cachedPageBitmap) {
+            BitmapSafety.recycleQuietly(activePage)
+        }
+        cachedPageBitmap = null
+        cachedPageNumber = null
+        super.onCleared()
     }
 
     companion object {
