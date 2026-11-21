@@ -15,6 +15,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -86,7 +87,7 @@ fun WordExportSection(
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             Button(
-                onClick = exportViewModel::openModeChooser,
+                onClick = { exportViewModel.requestExport(documentId) },
                 enabled = isReviewApproved && !uiState.isExporting,
                 modifier = Modifier
                     .fillMaxWidth()
@@ -175,9 +176,11 @@ fun WordExportSection(
                         )
                         OutlinedButton(
                             onClick = {
-                                exportViewModel.shareExistingDocx(
+                                exportViewModel.requestShare(
+                                    documentId = documentId,
                                     filePath = exportedDocument.docxFileRef,
                                     documentTitle = documentTitle,
+                                    fallbackMode = exportedDocument.exportMode.toWordExportMode(),
                                 )
                             },
                             border = BorderStroke(1.dp, ext.success),
@@ -255,6 +258,26 @@ fun WordExportSection(
             }
         }
 
+        if (uiState.warningDialogState != null) {
+            val warningState = uiState.warningDialogState!!
+            PreExportWarningDialog(
+                warningPageCount = warningState.summary.warningPageCount,
+                onExportCleanOnly = {
+                    exportViewModel.confirmExportWarningChoice(
+                        context = context,
+                        includeWarnings = false,
+                    )
+                },
+                onExportWithWarnings = {
+                    exportViewModel.confirmExportWarningChoice(
+                        context = context,
+                        includeWarnings = true,
+                    )
+                },
+                onReturnToReview = exportViewModel::dismissWarningDialog,
+            )
+        }
+
         if (uiState.isModeDialogVisible) {
             WordExportModeDialog(
                 recommendedMode = preferredExportMode.toWordExportMode(),
@@ -263,11 +286,80 @@ fun WordExportSection(
                         context = context,
                         documentId = documentId,
                         mode = mode,
+                        includeWarnings = uiState.pendingIncludeWarnings,
                     )
                 },
                 onDismiss = exportViewModel::dismissModeChooser,
             )
         }
+    }
+}
+
+@Composable
+fun PreExportWarningDialog(
+    warningPageCount: Int,
+    onExportCleanOnly: () -> Unit,
+    onExportWithWarnings: () -> Unit,
+    onReturnToReview: () -> Unit,
+) {
+    CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Rtl) {
+        AlertDialog(
+            onDismissRequest = onReturnToReview,
+            modifier = Modifier.testTag("pre_export_warning_dialog"),
+            icon = {
+                Icon(
+                    imageVector = Icons.Default.Warning,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.error,
+                )
+            },
+            title = {
+                Text(
+                    text = "تنبيه قبل التصدير",
+                    fontWeight = FontWeight.Bold,
+                )
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text(
+                        text = "هناك $warningPageCount صفحات بها تحذيرات (قد يكون النص ناقصاً أو غير مكتمل).",
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.testTag("pre_export_warning_body"),
+                    )
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(
+                            onClick = onExportCleanOnly,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .minimumInteractiveComponentSize()
+                                .testTag("export_clean_only_button"),
+                        ) {
+                            Text("تصدير النظيف فقط")
+                        }
+                        OutlinedButton(
+                            onClick = onExportWithWarnings,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .minimumInteractiveComponentSize()
+                                .testTag("export_with_warnings_button"),
+                        ) {
+                            Text("تصدير مع التحذيرات")
+                        }
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = {
+                TextButton(
+                    onClick = onReturnToReview,
+                    modifier = Modifier
+                        .minimumInteractiveComponentSize()
+                        .testTag("return_to_review_button"),
+                ) {
+                    Text("العودة للمراجعة")
+                }
+            },
+        )
     }
 }
 

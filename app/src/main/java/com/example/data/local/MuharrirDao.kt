@@ -181,6 +181,31 @@ interface PageDao {
     @Query("SELECT * FROM pages WHERE documentId = :documentId AND hasMissingContent = 1 ORDER BY originalPageNumber ASC")
     fun observePagesWithMissingContent(documentId: String): Flow<List<PageEntity>>
 
+    @Query("UPDATE pages SET pageStatus = :pageStatus, failureReason = :failureReason WHERE pageId = :pageId")
+    suspend fun updatePageFailureState(pageId: String, pageStatus: String, failureReason: String?)
+
+    @Query(
+        """
+        SELECT * FROM pages
+        WHERE documentId = :documentId
+          AND pageStatus = 'FAILED'
+          AND (failureReason IS NULL OR failureReason != 'user_skipped')
+        ORDER BY originalPageNumber ASC
+        """,
+    )
+    suspend fun getPagesWithFailedAnalysis(documentId: String): List<PageEntity>
+
+    @Query(
+        """
+        SELECT * FROM pages
+        WHERE documentId = :documentId
+          AND pageStatus = 'FAILED'
+          AND (failureReason IS NULL OR failureReason != 'user_skipped')
+        ORDER BY originalPageNumber ASC
+        """,
+    )
+    fun observePagesWithFailedAnalysis(documentId: String): Flow<List<PageEntity>>
+
     @Query("DELETE FROM pages WHERE documentId = :documentId")
     suspend fun deletePagesForDocument(documentId: String)
 

@@ -8,6 +8,8 @@ import androidx.core.content.FileProvider
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.export.docx.WordGenerator
+import com.example.export.domain.WordTextAssembler
+import com.example.export.model.ExportWarningSummary
 import com.example.export.model.WordExportDataGateway
 import com.example.export.model.WordExportMode
 import kotlinx.coroutines.CancellationException
@@ -24,8 +26,25 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 
+sealed interface PendingExportWarningAction {
+    data object OpenModeChooser : PendingExportWarningAction
+    data class ShareDocument(
+        val filePath: String,
+        val documentTitle: String,
+        val fallbackMode: WordExportMode,
+    ) : PendingExportWarningAction
+}
+
+data class ExportWarningDialogState(
+    val documentId: String,
+    val summary: ExportWarningSummary,
+    val pendingAction: PendingExportWarningAction,
+)
+
 data class WordExportUiState(
     val isModeDialogVisible: Boolean = false,
+    val warningDialogState: ExportWarningDialogState? = null,
+    val pendingIncludeWarnings: Boolean = false,
     val isExporting: Boolean = false,
     val lastExportedFile: File? = null,
     val statusMessage: String? = null,
@@ -50,11 +69,110 @@ class WordExportViewModel(
     val events: SharedFlow<WordExportEvent> = _events.asSharedFlow()
 
     fun openModeChooser() {
-        _uiState.update { it.copy(isModeDialogVisible = true, errorMessage = null, statusMessage = null) }
+        _uiState.update {
+            it.copy(
+                isModeDialogVisible = true,
+                pendingIncludeWarnings = false,
+                errorMessage = null,
+                statusMessage = null,
+            )
+        }
+    }
+
+    fun requestExport(documentId: String) {
+        _uiState.update { it.copy(errorMessage = null, statusMessage = null) }
+        viewModelScope.launch {
+            val summary = loadWarningSummaryIfEnabled(documentId)
+            if (summary != null && summary.hasWarnings) {
+                _uiState.update {
+                    it.copy(
+                        warningDialogState = ExportWarningDialogState(
+                            documentId = documentId,
+                            summary = summary,
+                            pendingAction = PendingExportWarningAction.OpenModeChooser,
+                        ),
+                    )
+                }
+            } else {
+                _uiState.update {
+                    it.copy(
+                        isModeDialogVisible = true,
+                        pendingIncludeWarnings = false,
+                    )
+                }
+            }
+        }
+    }
+
+    fun requestShare(
+        documentId: String,
+        filePath: String,
+        documentTitle: String,
+        fallbackMode: WordExportMode,
+    ) {
+        val file = File(filePath)
+        if (!file.exists() || !file.isFile) {
+            _uiState.update {
+                it.copy(errorMessage = "ملف Word السابق غير موجود على الجهاز؛ يمكنك إعادة إنشائه.")
+            }
+            return
+        }
+        viewModelScope.launch {
+            val summary = loadWarningSummaryIfEnabled(documentId)
+            if (summary != null && summary.hasWarnings) {
+                _uiState.update {
+                    it.copy(
+                        warningDialogState = ExportWarningDialogState(
+                            documentId = documentId,
+                            summary = summary,
+                            pendingAction = PendingExportWarningAction.ShareDocument(
+                                filePath = filePath,
+                                documentTitle = documentTitle,
+                                fallbackMode = fallbackMode,
+                            ),
+                        ),
+                    )
+                }
+            } else {
+                _events.emit(WordExportEvent.ShareDocxFile(file, documentTitle))
+            }
+        }
+    }
+
+    fun confirmExportWarningChoice(
+        context: Context,
+        includeWarnings: Boolean,
+    ) {
+        val activeDialog = _uiState.value.warningDialogState ?: return
+        _uiState.update { it.copy(warningDialogState = null) }
+
+        when (val action = activeDialog.pendingAction) {
+            is PendingExportWarningAction.OpenModeChooser -> {
+                _uiState.update {
+                    it.copy(
+                        pendingIncludeWarnings = includeWarnings,
+                        isModeDialogVisible = true,
+                    )
+                }
+            }
+
+            is PendingExportWarningAction.ShareDocument -> {
+                exportDocument(
+                    context = context,
+                    documentId = activeDialog.documentId,
+                    mode = action.fallbackMode,
+                    includeWarnings = includeWarnings,
+                )
+            }
+        }
+    }
+
+    fun dismissWarningDialog() {
+        _uiState.update { it.copy(warningDialogState = null, pendingIncludeWarnings = false) }
     }
 
     fun dismissModeChooser() {
-        _uiState.update { it.copy(isModeDialogVisible = false) }
+        _uiState.update { it.copy(isModeDialogVisible = false, pendingIncludeWarnings = false) }
     }
 
     fun dismissError() {
@@ -73,11 +191,14 @@ class WordExportViewModel(
         context: Context,
         documentId: String,
         mode: WordExportMode,
+        includeWarnings: Boolean = _uiState.value.pendingIncludeWarnings,
     ) {
         val appContext = context.applicationContext
         _uiState.update {
             it.copy(
                 isModeDialogVisible = false,
+                warningDialogState = null,
+                pendingIncludeWarnings = false,
                 isExporting = true,
                 errorMessage = null,
                 statusMessage = null,
@@ -116,6 +237,7 @@ class WordExportViewModel(
                         mode = mode,
                         outputFile = outFile,
                         highlightUnresolved = highlightUnresolved,
+                        includeWarnings = includeWarnings,
                     )
                     dataGateway.recordExportedDocument(
                         documentId = documentId,
@@ -158,6 +280,21 @@ class WordExportViewModel(
         }
         viewModelScope.launch {
             _events.emit(WordExportEvent.ShareDocxFile(file, documentTitle))
+        }
+    }
+
+    private suspend fun loadWarningSummaryIfEnabled(documentId: String): ExportWarningSummary? {
+        return try {
+            withContext(ioDispatcher) {
+                if (!dataGateway.shouldShowExportWarnings()) return@withContext null
+                val pages = dataGateway.getPagesInOrder(documentId)
+                val items = dataGateway.getReviewItemsInOrder(documentId)
+                WordTextAssembler.inspectWarnings(pages, items)
+            }
+        } catch (ce: CancellationException) {
+            throw ce
+        } catch (_: Exception) {
+            null
         }
     }
 }

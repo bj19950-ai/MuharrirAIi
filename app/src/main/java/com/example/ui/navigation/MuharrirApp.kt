@@ -162,8 +162,11 @@ fun MuharrirApp(
     val suspiciousFixState by viewModel.suspiciousFixState.collectAsStateWithLifecycle()
     val pagesWithMissingContent by viewModel.pagesWithMissingContent.collectAsStateWithLifecycle()
     val reprocessingMissingPageIds by viewModel.reprocessingMissingPageIds.collectAsStateWithLifecycle()
+    val pagesWithFailedAnalysis by viewModel.pagesWithFailedAnalysis.collectAsStateWithLifecycle()
+    val retryingPageIds by viewModel.retryingPageIds.collectAsStateWithLifecycle()
     val appearancePreferences by viewModel.appearancePreferences.collectAsStateWithLifecycle()
     val autoAcceptHighConfidenceGemini by viewModel.autoAcceptHighConfidenceGemini.collectAsStateWithLifecycle()
+    val showExportWarnings by viewModel.showExportWarnings.collectAsStateWithLifecycle()
     var showLaunchSplash by rememberSaveable { mutableStateOf(true) }
 
     val navigateToRoute: (String) -> Unit = { route ->
@@ -392,6 +395,8 @@ fun MuharrirApp(
                             suspiciousFixState = suspiciousFixState,
                             pagesWithMissingContent = pagesWithMissingContent,
                             reprocessingMissingPageIds = reprocessingMissingPageIds,
+                            pagesWithFailedAnalysis = pagesWithFailedAnalysis,
+                            retryingPageIds = retryingPageIds,
                             geminiState = geminiExecutionState,
                             geminiKeys = geminiKeys,
                             geminiUsageStats = geminiUsageStats,
@@ -411,6 +416,9 @@ fun MuharrirApp(
                             onStartGeminiAnalysis = viewModel::startGeminiAnalysis,
                             onFixSuspiciousPagesWithGemini = viewModel::fixSuspiciousPagesWithGemini,
                             onForceGeminiExtractionForPage = viewModel::forceGeminiExtractionForPage,
+                            onRetryFailedPage = viewModel::retryPageAnalysis,
+                            onSkipFailedPage = viewModel::skipPageAnalysis,
+                            onRetryAllFailedPages = viewModel::retryAllFailed,
                             onPauseGeminiAnalysis = viewModel::pauseGeminiAnalysis,
                             wordExportViewModel = wordExportViewModel,
                             onOpenSettings = { navigateToRoute(MuharrirRoutes.ROUTE_SETTINGS) },
@@ -498,6 +506,8 @@ fun MuharrirApp(
                             onToggleResumeAfterInterruption = viewModel::setResumeAfterInterruption,
                             autoAcceptHighConfidenceGemini = autoAcceptHighConfidenceGemini,
                             onToggleAutoAcceptHighConfidenceGemini = viewModel::setAutoAcceptHighConfidenceGemini,
+                            showExportWarnings = showExportWarnings,
+                            onToggleShowExportWarnings = viewModel::setShowExportWarnings,
                         )
                     }
                 }

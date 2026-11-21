@@ -198,7 +198,7 @@ class OcrTextCleanerTest {
     }
 
     @Test
-    fun `word generator academic mode formats headings as 16pt bold and body paragraphs as 14pt`() {
+    fun `word generator academic mode formats headings as bold Traditional Arabic and body paragraphs as 12pt Simplified Arabic`() {
         val generator = WordGenerator()
         val doc = ExportDocumentModel("doc-acad", "ملف_أكاديمي.pdf", reviewApprovedAt = 1700000000000L)
         val pages = listOf(
@@ -206,11 +206,11 @@ class OcrTextCleanerTest {
                 id = "p1",
                 documentId = "doc-acad",
                 pageNumber = 1,
-                // Paragraph 1 (trailing colon -> standalone; or short heading on last line without punctuation)
                 ocrText = """
+                    الفصل الأول
                     يعد العقد شريعة المتعاقدين
                     ويجب تنفيذه بحسن نية.
-                    أركان العقد الأساسية
+                    المبحث الأول
                 """.trimIndent(),
             ),
         )
@@ -233,17 +233,20 @@ class OcrTextCleanerTest {
                     .parse(xmlBytes.inputStream())
 
                 val paragraphs = dom.getElementsByTagNameNS("*", "p")
-                // Document title + Page 1 heading + Body paragraph + Heading paragraph
-                assertEquals(4, paragraphs.length)
+                // H1 + Body + H2 (no artificial Page 1 / filename header)
+                assertEquals(3, paragraphs.length)
 
-                // Check body paragraph ("يعد العقد شريعة المتعاقدين ويجب تنفيذه بحسن نية.") uses 14pt (w:sz val="28") and not bold
                 val bodyParaXml = xmlBytes.toString(Charsets.UTF_8)
                 assertTrue(bodyParaXml.contains("يعد العقد شريعة المتعاقدين ويجب تنفيذه بحسن نية."))
-                assertTrue(bodyParaXml.contains("أركان العقد الأساسية"))
-                // 14pt = 28 half-points, 16pt = 32 half-points
-                assertTrue("Expected 14pt (w:val=\"28\") for academic body text", bodyParaXml.contains("w:val=\"28\""))
-                assertTrue("Expected 16pt (w:val=\"32\") for academic heading", bodyParaXml.contains("w:val=\"32\""))
-                assertFalse(bodyParaXml.contains(WordTextAssembler.TEXT_LOSS_WARNING_MESSAGE))
+                assertTrue(bodyParaXml.contains("الفصل الأول"))
+                assertTrue(bodyParaXml.contains("المبحث الأول"))
+                assertFalse(bodyParaXml.contains("الصفحة 1"))
+                // 12pt = 24 half-points (body), 16pt = 32 (H2), 18pt = 36 (H1)
+                assertTrue("Expected 12pt (w:val=\"24\") for academic body text", bodyParaXml.contains("w:val=\"24\""))
+                assertTrue("Expected 16pt (w:val=\"32\") for H2 heading", bodyParaXml.contains("w:val=\"32\""))
+                assertTrue("Expected 18pt (w:val=\"36\") for H1 heading", bodyParaXml.contains("w:val=\"36\""))
+                assertFalse(bodyParaXml.contains(WordGenerator.EXPORT_PAGE_WARNING_FOOTNOTE))
+                assertFalse(bodyParaXml.contains("تحذير"))
             }
         } finally {
             tempOut.delete()
@@ -282,7 +285,7 @@ class OcrTextCleanerTest {
     }
 
     @Test
-    fun `word generator writes red warning note when cleaned text drops below 80 percent of raw OCR`() {
+    fun `word generator writes red warning note when includeWarnings is true and cleaned text drops below 80 percent of raw OCR`() {
         val generator = WordGenerator()
         val doc = ExportDocumentModel("doc-loss", "تحذير_فقد.pdf", reviewApprovedAt = 1700000000000L)
         val pages = listOf(
@@ -302,10 +305,17 @@ class OcrTextCleanerTest {
 
         val tempOut = kotlin.io.path.createTempFile("m10_loss_warning_", ".docx").toFile()
         try {
-            generator.generate(doc, pages, emptyList(), WordExportMode.MATCH_ORIGINAL, tempOut)
+            generator.generate(
+                document = doc,
+                pages = pages,
+                reviewItems = emptyList(),
+                mode = WordExportMode.MATCH_ORIGINAL,
+                outputFile = tempOut,
+                includeWarnings = true,
+            )
             ZipFile(tempOut).use { zip ->
                 val xmlString = zip.getInputStream(zip.getEntry("word/document.xml")).readBytes().toString(Charsets.UTF_8)
-                assertTrue(xmlString.contains(WordTextAssembler.TEXT_LOSS_WARNING_MESSAGE))
+                assertTrue(xmlString.contains(WordGenerator.EXPORT_PAGE_WARNING_FOOTNOTE))
                 assertTrue(xmlString.contains(WordGenerator.UNRESOLVED_TEXT_RED_HEX))
                 assertTrue(xmlString.contains("النص القصير المتبقي."))
             }

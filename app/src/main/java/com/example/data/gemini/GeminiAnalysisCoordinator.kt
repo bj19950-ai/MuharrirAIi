@@ -5,8 +5,14 @@ import com.example.domain.model.GeminiKeyRecord
 import com.example.domain.model.GeminiKeyStatus
 import com.example.domain.model.GeminiModelConfig
 import com.example.domain.model.GeminiPageAnalysisRecord
+import com.example.domain.model.PageFailureReasons
 import com.example.domain.model.PageRecord
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.withTimeout
 
 sealed interface GeminiKeyTestOutcome {
     data class Valid(val key: GeminiKeyRecord, val messageAr: String) : GeminiKeyTestOutcome
@@ -23,6 +29,7 @@ sealed interface GeminiPageAnalysisOutcome {
     data class Failure(
         val reasonAr: String,
         val attemptsMade: Int,
+        val failureReason: String? = null,
     ) : GeminiPageAnalysisOutcome
 }
 
@@ -33,6 +40,7 @@ sealed interface GeminiPageAnalysisOutcome {
 class GeminiAnalysisCoordinator(
     private val keyVault: GeminiApiKeyVault,
     private val client: GeminiPageClient,
+    private val pageTimeoutMillis: Long = DEFAULT_PAGE_TIMEOUT_MS,
     private val backoffDelayMillis: suspend (Long) -> Unit = { ms -> delay(ms) },
 ) {
 
@@ -150,11 +158,14 @@ class GeminiAnalysisCoordinator(
             val serverRetryUsedPerKey = mutableSetOf<String>()
             var backoffRound = 0
             var malformedRetryCount = 0
+            var transientRetryCount = 0
             var totalAttempts = 0
+            var lastFailureReason: String? = null
             val maxRateLimitRetries = GeminiModelConfig.MAX_RATE_LIMIT_RETRIES_PER_KEY_PER_PAGE
             val maxAttemptsPerKeyOnRateLimit = 1 + maxRateLimitRetries // initial attempt + max 2 retries
 
             while (true) {
+                currentCoroutineContext().ensureActive()
                 val candidateKey = keyVault.getNextEnabledKey(
                     excludingIds = permanentlySkippedForPage + rateLimitedThisRound,
                 )
@@ -175,6 +186,7 @@ class GeminiAnalysisCoordinator(
                         return GeminiPageAnalysisOutcome.Failure(
                             reasonAr = "تعذر إكمال التحليل: جميع مفاتيح Gemini المفعلة إما غير صالحة أو نفدت حصتها أو استنفدت محاولات المعدل لهذه الصفحة.",
                             attemptsMade = totalAttempts,
+                            failureReason = lastFailureReason ?: PageFailureReasons.QUOTA,
                         )
                     }
                     val backoffMs = 1000L * (1L shl backoffRound.coerceAtMost(3))
@@ -203,12 +215,46 @@ class GeminiAnalysisCoordinator(
                     knownSecrets = listOf(rawSecret),
                 )
 
-                val callResult = client.analyzePage(
-                    apiKey = rawSecret,
-                    modelId = modelId,
-                    pageBitmap = prepared.bitmap,
-                    payload = payload,
-                )
+                val callResult = try {
+                    withTimeout(pageTimeoutMillis) {
+                        client.analyzePage(
+                            apiKey = rawSecret,
+                            modelId = modelId,
+                            pageBitmap = prepared.bitmap,
+                            payload = payload,
+                        )
+                    }
+                } catch (timeout: TimeoutCancellationException) {
+                    currentCoroutineContext().ensureActive()
+                    lastFailureReason = PageFailureReasons.TIMEOUT
+                    SensitiveKeyMasker.logSafe(
+                        tag = TAG,
+                        message = "Gemini timeout (${pageTimeoutMillis}ms) on page=${page.originalPageNumber} using '${selectedKey.label}' (${selectedKey.maskedPrefix})",
+                        knownSecrets = listOf(rawSecret),
+                        isWarning = true,
+                    )
+                    val timeoutMsg = "انتهت مهلة تحليل الصفحة ${page.originalPageNumber} عبر Gemini (${pageTimeoutMillis / 1000} ثانية)."
+                    keyVault.recordRequestOutcome(
+                        keyId = selectedKey.id,
+                        keyLabel = selectedKey.label,
+                        statusAr = timeoutMsg,
+                        succeeded = false,
+                        incrementDailyCounter = false,
+                    )
+                    transientRetryCount++
+                    if (transientRetryCount < MAX_PAGE_TRANSIENT_ATTEMPTS) {
+                        continue
+                    }
+                    return GeminiPageAnalysisOutcome.Failure(
+                        reasonAr = timeoutMsg,
+                        attemptsMade = totalAttempts,
+                        failureReason = PageFailureReasons.TIMEOUT,
+                    )
+                } catch (cancel: CancellationException) {
+                    throw cancel
+                } catch (unexpected: Throwable) {
+                    Result.failure(unexpected)
+                }
 
                 var shouldReturn: GeminiPageAnalysisOutcome? = null
 
@@ -250,6 +296,7 @@ class GeminiAnalysisCoordinator(
                                 )
                             }
                             is GeminiValidationResult.Malformed -> {
+                                lastFailureReason = PageFailureReasons.PARSE_ERROR
                                 keyVault.recordRequestOutcome(
                                     keyId = selectedKey.id,
                                     keyLabel = selectedKey.label,
@@ -264,6 +311,7 @@ class GeminiAnalysisCoordinator(
                                     shouldReturn = GeminiPageAnalysisOutcome.Failure(
                                         reasonAr = "استجاب Gemini بصيغة غير مطابقة للمخطط بعد إعادة المحاولة: ${validation.reasonAr}",
                                         attemptsMade = totalAttempts,
+                                        failureReason = PageFailureReasons.PARSE_ERROR,
                                     )
                                 }
                             }
@@ -271,6 +319,7 @@ class GeminiAnalysisCoordinator(
                     },
                     onFailure = { throwable ->
                         val classified = GeminiErrorClassifier.classify(throwable, listOf(rawSecret))
+                        lastFailureReason = mapKindToFailureReason(classified.kind)
                         SensitiveKeyMasker.logSafe(
                             tag = TAG,
                             message = "Gemini failure on key '${selectedKey.label}' (${selectedKey.maskedPrefix}): ${classified.diagnosticSafeSummary}",
@@ -321,10 +370,14 @@ class GeminiAnalysisCoordinator(
                                 }
                             }
                             GeminiErrorKind.NETWORK_ERROR -> {
-                                shouldReturn = GeminiPageAnalysisOutcome.Failure(
-                                    reasonAr = classified.arabicMessage,
-                                    attemptsMade = totalAttempts,
-                                )
+                                transientRetryCount++
+                                if (transientRetryCount >= MAX_PAGE_TRANSIENT_ATTEMPTS) {
+                                    shouldReturn = GeminiPageAnalysisOutcome.Failure(
+                                        reasonAr = classified.arabicMessage,
+                                        attemptsMade = totalAttempts,
+                                        failureReason = PageFailureReasons.NETWORK_ERROR,
+                                    )
+                                }
                             }
                             GeminiErrorKind.MALFORMED_OUTPUT -> {
                                 if (malformedRetryCount < 1) {
@@ -333,6 +386,7 @@ class GeminiAnalysisCoordinator(
                                     shouldReturn = GeminiPageAnalysisOutcome.Failure(
                                         reasonAr = classified.arabicMessage,
                                         attemptsMade = totalAttempts,
+                                        failureReason = PageFailureReasons.PARSE_ERROR,
                                     )
                                 }
                             }
@@ -384,7 +438,9 @@ class GeminiAnalysisCoordinator(
             var backoffRound = 0
             val maxAttemptsPerKeyOnRateLimit = 1 + GeminiModelConfig.MAX_RATE_LIMIT_RETRIES_PER_KEY_PER_PAGE
 
+            var transientRetryCount = 0
             while (true) {
+                currentCoroutineContext().ensureActive()
                 val candidateKey = keyVault.getNextEnabledKey(
                     excludingIds = permanentlySkippedForPage + rateLimitedThisRound,
                 )
@@ -429,12 +485,29 @@ class GeminiAnalysisCoordinator(
                     knownSecrets = listOf(rawSecret),
                 )
 
-                val callResult = client.extractPlainText(
-                    apiKey = rawSecret,
-                    modelId = modelId,
-                    pageBitmap = prepared.bitmap,
-                    prompt = prompt,
-                )
+                val callResult = try {
+                    withTimeout(pageTimeoutMillis) {
+                        client.extractPlainText(
+                            apiKey = rawSecret,
+                            modelId = modelId,
+                            pageBitmap = prepared.bitmap,
+                            prompt = prompt,
+                        )
+                    }
+                } catch (timeout: TimeoutCancellationException) {
+                    currentCoroutineContext().ensureActive()
+                    transientRetryCount++
+                    if (transientRetryCount < MAX_PAGE_TRANSIENT_ATTEMPTS) {
+                        continue
+                    }
+                    return Result.failure(
+                        IllegalStateException("انتهت مهلة الاستخراج الاحتياطي للصفحة $pageNumber عبر Gemini."),
+                    )
+                } catch (cancel: CancellationException) {
+                    throw cancel
+                } catch (unexpected: Throwable) {
+                    Result.failure(unexpected)
+                }
 
                 var finalResult: Result<String>? = null
                 callResult.fold(
@@ -530,7 +603,20 @@ class GeminiAnalysisCoordinator(
         }
     }
 
+    private fun mapKindToFailureReason(kind: GeminiErrorKind): String = when (kind) {
+        GeminiErrorKind.INVALID_KEY -> PageFailureReasons.INVALID_KEY
+        GeminiErrorKind.PERMISSION_DENIED -> PageFailureReasons.PERMISSION_DENIED
+        GeminiErrorKind.QUOTA_EXHAUSTED -> PageFailureReasons.QUOTA
+        GeminiErrorKind.RATE_LIMITED -> PageFailureReasons.RATE_LIMITED
+        GeminiErrorKind.SERVER_ERROR -> PageFailureReasons.SERVER_ERROR
+        GeminiErrorKind.NETWORK_ERROR -> PageFailureReasons.NETWORK_ERROR
+        GeminiErrorKind.MALFORMED_OUTPUT -> PageFailureReasons.PARSE_ERROR
+        GeminiErrorKind.UNKNOWN_FAILURE -> PageFailureReasons.UNKNOWN_ERROR
+    }
+
     companion object {
         private const val TAG = "MuharrirGeminiCoord"
+        const val DEFAULT_PAGE_TIMEOUT_MS = 90_000L
+        const val MAX_PAGE_TRANSIENT_ATTEMPTS = 2
     }
 }

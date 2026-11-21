@@ -201,6 +201,20 @@ data class ReviewItem(
     val elementIndex: Int = 0,
 )
 
+object PageFailureReasons {
+    const val TIMEOUT = "timeout"
+    const val QUOTA = "quota"
+    const val RATE_LIMITED = "rate_limited"
+    const val PARSE_ERROR = "parse_error"
+    const val NETWORK_ERROR = "network_error"
+    const val INVALID_KEY = "invalid_key"
+    const val PERMISSION_DENIED = "permission_denied"
+    const val SERVER_ERROR = "server_error"
+    const val RENDER_ERROR = "render_error"
+    const val UNKNOWN_ERROR = "unknown_error"
+    const val USER_SKIPPED = "user_skipped"
+}
+
 data class PageRecord(
     val pageId: String,
     val documentId: String,
@@ -216,6 +230,7 @@ data class PageRecord(
     val ocrResult: OcrResult? = null,
     val geminiAnalysis: GeminiPageAnalysisRecord? = null,
     val hasMissingContent: Boolean = false,
+    val failureReason: String? = null,
 )
 
 data class ExportedDocument(

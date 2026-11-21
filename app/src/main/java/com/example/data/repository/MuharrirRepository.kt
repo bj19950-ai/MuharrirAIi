@@ -5,11 +5,13 @@ import android.graphics.Bitmap
 import android.net.Uri
 import com.example.data.comparison.ComparisonPageSummary
 import com.example.data.comparison.OcrGeminiComparisonEngine
+import com.example.data.gemini.EncryptedGeminiApiKeyVault
 import com.example.data.gemini.GeminiAnalysisCoordinator
 import com.example.data.gemini.GeminiApiKeyVault
+import com.example.data.gemini.GeminiErrorClassifier
+import com.example.data.gemini.GeminiErrorKind
 import com.example.data.gemini.GeminiKeyTestOutcome
 import com.example.data.gemini.GeminiPageAnalysisOutcome
-import com.example.data.gemini.EncryptedGeminiApiKeyVault
 import com.example.data.gemini.GoogleAiGeminiClient
 import com.example.data.local.ApiKeySlotEntity
 import com.example.data.local.DocumentEntity
@@ -41,6 +43,7 @@ import com.example.domain.model.GeminiUsageStats
 import com.example.domain.model.ImportStatus
 import com.example.domain.model.OcrEngineType
 import com.example.domain.model.OcrPageStatus
+import com.example.domain.model.PageFailureReasons
 import com.example.domain.model.PageRecord
 import com.example.domain.model.PageStatus
 import com.example.domain.model.PipelineStageInfo
@@ -156,7 +159,7 @@ class MuharrirRepository(
     val pageBitmapSource: com.example.review.model.PageBitmapSource =
         MuharrirPageBitmapSource(database, storage, pageEngine)
     val wordExportDataGateway: com.example.export.model.WordExportDataGateway =
-        MuharrirWordExportDataGateway(database)
+        MuharrirWordExportDataGateway(database, smartReviewPrefs = smartReviewPrefs)
 
     val documents: Flow<List<DocumentRecord>> =
         documentDao.observeActiveDocuments().map { entities ->
@@ -540,6 +543,7 @@ class MuharrirRepository(
                 ocrErrorMessageAr = null,
                 ocrUpdatedAtMillis = now,
             )
+            pageDao.updatePageFailureState(page.pageId, PageStatus.REVIEWED.name, null)
             markPageGeminiRepaired(page.pageId, true)
 
             if (doc.status == DocumentStatus.NEEDS_REVIEW && doc.reviewApprovedAt == null) {
@@ -1240,6 +1244,7 @@ class MuharrirRepository(
         } else {
             eligiblePages.filter {
                 it.geminiAnalysis == null &&
+                    it.failureReason != PageFailureReasons.USER_SKIPPED &&
                     it.originalPageNumber in effectiveStartPage..effectiveEndPage
             }
         }
@@ -1285,11 +1290,20 @@ class MuharrirRepository(
                     if (pageBitmap == null) {
                         failedCount++
                         lastErrorMsg = "تعذر تصيير صورة الصفحة ${page.originalPageNumber} لإرسالها إلى Gemini."
+                        pageDao.updatePageFailureState(
+                            pageId = page.pageId,
+                            pageStatus = PageStatus.FAILED.name,
+                            failureReason = PageFailureReasons.RENDER_ERROR,
+                        )
                     } else {
                         when (val outcome = coordinator.analyzePageWithFailover(page, pageBitmap)) {
                             is GeminiPageAnalysisOutcome.Success -> {
                                 geminiAnalysisDao.upsertAnalysis(outcome.record.toEntity())
-                                pageDao.updatePageStatus(page.pageId, PageStatus.ANALYZED.name)
+                                pageDao.updatePageFailureState(
+                                    pageId = page.pageId,
+                                    pageStatus = PageStatus.ANALYZED.name,
+                                    failureReason = null,
+                                )
                                 pageDao.updatePageMissingContent(
                                     pageId = page.pageId,
                                     hasMissingContent = outcome.record.isMissingLargeContent,
@@ -1304,9 +1318,35 @@ class MuharrirRepository(
                             is GeminiPageAnalysisOutcome.Failure -> {
                                 failedCount++
                                 lastErrorMsg = outcome.reasonAr
+                                pageDao.updatePageFailureState(
+                                    pageId = page.pageId,
+                                    pageStatus = PageStatus.FAILED.name,
+                                    failureReason = outcome.failureReason ?: PageFailureReasons.UNKNOWN_ERROR,
+                                )
                             }
                         }
                     }
+                } catch (cancel: CancellationException) {
+                    throw cancel
+                } catch (throwable: Throwable) {
+                    val classified = GeminiErrorClassifier.classify(throwable)
+                    val reasonCode = when (classified.kind) {
+                        GeminiErrorKind.INVALID_KEY -> PageFailureReasons.INVALID_KEY
+                        GeminiErrorKind.PERMISSION_DENIED -> PageFailureReasons.PERMISSION_DENIED
+                        GeminiErrorKind.QUOTA_EXHAUSTED -> PageFailureReasons.QUOTA
+                        GeminiErrorKind.RATE_LIMITED -> PageFailureReasons.RATE_LIMITED
+                        GeminiErrorKind.SERVER_ERROR -> PageFailureReasons.SERVER_ERROR
+                        GeminiErrorKind.NETWORK_ERROR -> PageFailureReasons.NETWORK_ERROR
+                        GeminiErrorKind.MALFORMED_OUTPUT -> PageFailureReasons.PARSE_ERROR
+                        GeminiErrorKind.UNKNOWN_FAILURE -> PageFailureReasons.UNKNOWN_ERROR
+                    }
+                    failedCount++
+                    lastErrorMsg = classified.arabicMessage
+                    pageDao.updatePageFailureState(
+                        pageId = page.pageId,
+                        pageStatus = PageStatus.FAILED.name,
+                        failureReason = reasonCode,
+                    )
                 } finally {
                     if (pageBitmap != null && !pageBitmap.isRecycled) {
                         pageBitmap.recycle()
@@ -1385,6 +1425,153 @@ class MuharrirRepository(
             totalEligiblePages = eligiblePages.size,
             lastMessageAr = summaryAr,
         )
+    }
+
+    suspend fun getPagesWithFailedAnalysis(documentId: String): List<PageRecord> =
+        withContext(Dispatchers.IO) {
+            val ocrByPageId = ocrResultDao.getOcrResultsForDocument(documentId).associateBy { it.pageId }
+            val geminiByPageId = geminiAnalysisDao.getAnalysesForDocument(documentId).associateBy { it.pageId }
+            pageDao.getPagesWithFailedAnalysis(documentId).map { entity ->
+                entity.toDomain(
+                    ocrResultEntity = ocrByPageId[entity.pageId],
+                    geminiAnalysisEntity = geminiByPageId[entity.pageId],
+                )
+            }
+        }
+
+    fun observePagesWithFailedAnalysis(documentId: String): Flow<List<PageRecord>> =
+        pageDao.observePagesWithFailedAnalysis(documentId).map { entities ->
+            entities.map { it.toDomain() }
+        }
+
+    /**
+     * Marks a failed page as user-skipped so it is removed from the failed queue
+     * and excluded from future batch Gemini runs, without deleting OCR text or review items.
+     */
+    suspend fun skipPageAnalysis(
+        documentId: String,
+        pageNumber: Int,
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        val doc = getDocumentById(documentId)
+            ?: return@withContext Result.failure(IllegalStateException("المستند المطلوب غير موجود."))
+        val page = doc.pages.firstOrNull { it.originalPageNumber == pageNumber }
+            ?: return@withContext Result.failure(IllegalStateException("الصفحة رقم $pageNumber غير موجودة في المستند."))
+
+        pageDao.updatePageFailureState(
+            pageId = page.pageId,
+            pageStatus = PageStatus.FAILED.name,
+            failureReason = PageFailureReasons.USER_SKIPPED,
+        )
+        Result.success(Unit)
+    }
+
+    /**
+     * Retries Gemini analysis for a single failed page.
+     * On success: sets page status = REVIEWED and clears failureReason.
+     * On failure: keeps page status = FAILED and updates failureReason.
+     */
+    suspend fun retryPageAnalysis(
+        documentId: String,
+        pageNumber: Int,
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        val coordinator = geminiCoordinator
+            ?: return@withContext Result.failure(IllegalStateException("منسق Gemini غير متوفر في هذا التكوين."))
+        val doc = getDocumentById(documentId)
+            ?: return@withContext Result.failure(IllegalStateException("المستند المطلوب غير موجود."))
+        val page = doc.pages.firstOrNull { it.originalPageNumber == pageNumber }
+            ?: return@withContext Result.failure(IllegalStateException("الصفحة رقم $pageNumber غير موجودة في المستند."))
+        if (page.ocrResult == null) {
+            return@withContext Result.failure(
+                IllegalStateException("يجب إتمام استخراج النص (OCR) للصفحة $pageNumber قبل إعادة تحليل Gemini."),
+            )
+        }
+        val privateFile = storage.resolvePrivatePdfIfExists(doc.internalStorageRef)
+            ?: return@withContext Result.failure(IllegalStateException("تعذر الوصول إلى ملف PDF في التخزين الخاص."))
+
+        var pageBitmap: Bitmap? = null
+        try {
+            pageBitmap = pageEngine.renderFromFile(
+                pdfFile = privateFile,
+                pageIndex = (pageNumber - 1).coerceAtLeast(0),
+                maxWidthPx = 1280,
+            )
+            if (pageBitmap == null) {
+                val msg = "تعذر تصيير صورة الصفحة $pageNumber لإعادة تحليلها عبر Gemini."
+                pageDao.updatePageFailureState(
+                    pageId = page.pageId,
+                    pageStatus = PageStatus.FAILED.name,
+                    failureReason = PageFailureReasons.RENDER_ERROR,
+                )
+                return@withContext Result.failure(IllegalStateException(msg))
+            }
+
+            when (val outcome = coordinator.analyzePageWithFailover(page, pageBitmap)) {
+                is GeminiPageAnalysisOutcome.Success -> {
+                    geminiAnalysisDao.upsertAnalysis(outcome.record.toEntity())
+                    pageDao.updatePageMissingContent(
+                        pageId = page.pageId,
+                        hasMissingContent = outcome.record.isMissingLargeContent,
+                    )
+                    comparisonEngine.compareAndPersistForPage(
+                        documentId = documentId,
+                        pageId = page.pageId,
+                        autoAcceptHighConfidence = smartReviewPrefs?.isAutoAcceptHighConfidenceEnabled() == true,
+                    )
+                    pageDao.updatePageFailureState(
+                        pageId = page.pageId,
+                        pageStatus = PageStatus.REVIEWED.name,
+                        failureReason = null,
+                    )
+
+                    val refreshedDoc = getDocumentById(documentId)
+                    val totalPagesCount = (refreshedDoc?.pages?.size ?: doc.pages.size).coerceAtLeast(1)
+                    val totalAnalyzedNow = refreshedDoc?.pages?.count { it.geminiAnalysis != null } ?: 1
+                    val countsAfter = reviewItemDao.countByStatus(documentId, includeAgreements = false)
+                    val hasPending = (countsAfter[ReviewStatus.PENDING] ?: 0) > 0 ||
+                        (countsAfter[ReviewStatus.STALE] ?: 0) > 0
+                    documentDao.updateProcessingProgress(
+                        documentId = documentId,
+                        processingStatus = if (hasPending) DocumentStatus.NEEDS_REVIEW.name else DocumentStatus.PROCESSING.name,
+                        processingProgressPercent = (totalAnalyzedNow * 100) / totalPagesCount,
+                        lastModifiedMillis = System.currentTimeMillis(),
+                        errorMessageAr = null,
+                    )
+                    Result.success(Unit)
+                }
+                is GeminiPageAnalysisOutcome.Failure -> {
+                    pageDao.updatePageFailureState(
+                        pageId = page.pageId,
+                        pageStatus = PageStatus.FAILED.name,
+                        failureReason = outcome.failureReason ?: PageFailureReasons.UNKNOWN_ERROR,
+                    )
+                    Result.failure(IllegalStateException(outcome.reasonAr))
+                }
+            }
+        } catch (cancel: CancellationException) {
+            throw cancel
+        } catch (throwable: Throwable) {
+            val classified = GeminiErrorClassifier.classify(throwable)
+            val reasonCode = when (classified.kind) {
+                GeminiErrorKind.INVALID_KEY -> PageFailureReasons.INVALID_KEY
+                GeminiErrorKind.PERMISSION_DENIED -> PageFailureReasons.PERMISSION_DENIED
+                GeminiErrorKind.QUOTA_EXHAUSTED -> PageFailureReasons.QUOTA
+                GeminiErrorKind.RATE_LIMITED -> PageFailureReasons.RATE_LIMITED
+                GeminiErrorKind.SERVER_ERROR -> PageFailureReasons.SERVER_ERROR
+                GeminiErrorKind.NETWORK_ERROR -> PageFailureReasons.NETWORK_ERROR
+                GeminiErrorKind.MALFORMED_OUTPUT -> PageFailureReasons.PARSE_ERROR
+                GeminiErrorKind.UNKNOWN_FAILURE -> PageFailureReasons.UNKNOWN_ERROR
+            }
+            pageDao.updatePageFailureState(
+                pageId = page.pageId,
+                pageStatus = PageStatus.FAILED.name,
+                failureReason = reasonCode,
+            )
+            Result.failure(IllegalStateException(classified.arabicMessage))
+        } finally {
+            if (pageBitmap != null && !pageBitmap.isRecycled) {
+                pageBitmap.recycle()
+            }
+        }
     }
 
     suspend fun comparePageOcrWithGemini(

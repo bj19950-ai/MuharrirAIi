@@ -21,6 +21,11 @@ class SmartReviewPreferencesStore(
     )
     val autoAcceptHighConfidence: StateFlow<Boolean> = _autoAcceptHighConfidence.asStateFlow()
 
+    private val _showExportWarnings = MutableStateFlow(
+        prefs.getBoolean(KEY_SHOW_EXPORT_WARNINGS, true),
+    )
+    val showExportWarnings: StateFlow<Boolean> = _showExportWarnings.asStateFlow()
+
     fun isAutoAcceptHighConfidenceEnabled(): Boolean = _autoAcceptHighConfidence.value
 
     fun setAutoAcceptHighConfidenceEnabled(enabled: Boolean) {
@@ -28,9 +33,17 @@ class SmartReviewPreferencesStore(
         _autoAcceptHighConfidence.value = enabled
     }
 
+    fun isShowExportWarningsEnabled(): Boolean = _showExportWarnings.value
+
+    fun setShowExportWarningsEnabled(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_SHOW_EXPORT_WARNINGS, enabled).apply()
+        _showExportWarnings.value = enabled
+    }
+
     companion object {
         const val PREFS_FILE_NAME = "muharrir_smart_review_prefs"
         private const val KEY_AUTO_ACCEPT_HIGH_CONFIDENCE = "auto_accept_high_confidence_gemini"
+        private const val KEY_SHOW_EXPORT_WARNINGS = "show_export_warnings"
 
         @Volatile
         private var instance: SmartReviewPreferencesStore? = null

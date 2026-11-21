@@ -2,6 +2,9 @@ package com.example.export.docx
 
 import android.content.Context
 import android.os.Environment
+import com.example.export.domain.BlockType
+import com.example.export.domain.StructuredBlock
+import com.example.export.domain.TextStructureParser
 import com.example.export.domain.WordTextAssembler
 import com.example.export.model.DocumentPageModel
 import com.example.export.model.ExportDocumentModel
@@ -9,19 +12,24 @@ import com.example.export.model.WordDocumentPlan
 import com.example.export.model.WordExportMode
 import com.example.export.model.WordTextSegment
 import com.example.review.model.ReviewItemModel
+import org.apache.poi.xwpf.usermodel.BreakType
 import org.apache.poi.xwpf.usermodel.ParagraphAlignment
 import org.apache.poi.xwpf.usermodel.XWPFDocument
 import org.apache.poi.xwpf.usermodel.XWPFParagraph
 import org.apache.poi.xwpf.usermodel.XWPFRun
+import org.apache.poi.xwpf.usermodel.XWPFStyle
 import org.apache.xmlbeans.XmlObject
+import org.openxmlformats.schemas.wordprocessingml.x2006.main.CTStyle
+import org.openxmlformats.schemas.wordprocessingml.x2006.main.STStyleType
 import java.io.File
 import java.io.FileOutputStream
+import java.math.BigInteger
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
 class WordGenerator(
-    private val arabicFontName: String = DEFAULT_ARABIC_FONT,
+    private val arabicFontName: String = DEFAULT_BODY_FONT,
 ) {
 
     fun generate(
@@ -31,6 +39,7 @@ class WordGenerator(
         mode: WordExportMode,
         outputFile: File,
         highlightUnresolved: Boolean = true,
+        includeWarnings: Boolean = false,
     ): File {
         require(document.reviewApprovedAt != null) {
             "لا يمكن إنشاء ملف Word قبل اعتماد المراجعة."
@@ -44,14 +53,54 @@ class WordGenerator(
             highlightUnresolved = highlightUnresolved,
         )
 
-        outputFile.parentFile?.mkdirs()
+        val warningSummary = if (includeWarnings) {
+            WordTextAssembler.inspectWarnings(pages, reviewItems)
+        } else {
+            null
+        }
 
+        outputFile.parentFile?.mkdirs()
         ensureStaxProvidersConfigured()
 
         val xwpfDocument = XWPFDocument()
         try {
+            registerAcademicStyles(xwpfDocument)
             enforceDocumentRtlSection(xwpfDocument)
-            writePlanToDocument(xwpfDocument, plan)
+            writePlanToDocument(
+                xwpfDocument = xwpfDocument,
+                plan = plan,
+                includeWarnings = includeWarnings,
+                warningPageNumbers = warningSummary?.warningPageNumbers ?: emptySet(),
+            )
+            FileOutputStream(outputFile).use { fos ->
+                xwpfDocument.write(fos)
+            }
+        } finally {
+            xwpfDocument.close()
+        }
+
+        return outputFile
+    }
+
+    fun generateFromBlocks(
+        blocks: List<StructuredBlock>,
+        outputFile: File,
+        includeWarnings: Boolean = false,
+        warningPageNumbers: Set<Int> = emptySet(),
+    ): File {
+        outputFile.parentFile?.mkdirs()
+        ensureStaxProvidersConfigured()
+
+        val xwpfDocument = XWPFDocument()
+        try {
+            registerAcademicStyles(xwpfDocument)
+            enforceDocumentRtlSection(xwpfDocument)
+            writeAcademicBlocks(
+                xwpfDocument = xwpfDocument,
+                blocks = blocks,
+                includeWarnings = includeWarnings,
+                warningPageNumbers = warningPageNumbers,
+            )
             FileOutputStream(outputFile).use { fos ->
                 xwpfDocument.write(fos)
             }
@@ -77,40 +126,63 @@ class WordGenerator(
         return File(documentsDir, "${safeName}_$timestamp.docx")
     }
 
-    private fun writePlanToDocument(xwpfDocument: XWPFDocument, plan: WordDocumentPlan) {
+    private fun writePlanToDocument(
+        xwpfDocument: XWPFDocument,
+        plan: WordDocumentPlan,
+        includeWarnings: Boolean,
+        warningPageNumbers: Set<Int>,
+    ) {
         when (plan.mode) {
-            WordExportMode.MATCH_ORIGINAL -> writeMatchOriginalMode(xwpfDocument, plan)
-            WordExportMode.ACADEMIC -> writeAcademicMode(xwpfDocument, plan)
+            WordExportMode.MATCH_ORIGINAL -> writeMatchOriginalMode(
+                xwpfDocument = xwpfDocument,
+                plan = plan,
+                includeWarnings = includeWarnings,
+                warningPageNumbers = warningPageNumbers,
+            )
+            WordExportMode.ACADEMIC -> {
+                val blocks = if (plan.academicBlocks.isNotEmpty()) {
+                    plan.academicBlocks
+                } else {
+                    fallbackBlocksFromPlan(plan)
+                }
+                writeAcademicBlocks(
+                    xwpfDocument = xwpfDocument,
+                    blocks = blocks,
+                    includeWarnings = includeWarnings,
+                    warningPageNumbers = warningPageNumbers,
+                )
+            }
         }
     }
 
-    private fun writeMatchOriginalMode(xwpfDocument: XWPFDocument, plan: WordDocumentPlan) {
-        val incompletePageNumbers = findIncompletePages(plan.pages)
+    private fun writeMatchOriginalMode(
+        xwpfDocument: XWPFDocument,
+        plan: WordDocumentPlan,
+        includeWarnings: Boolean,
+        warningPageNumbers: Set<Int>,
+    ) {
+        val font = resolveBodyFont()
         plan.pages.forEachIndexed { pageIdx, page ->
-            if (page.pageNumber in incompletePageNumbers) {
-                writeWarningParagraph(xwpfDocument, INCOMPLETE_PAGE_WARNING_MESSAGE)
-            }
-            page.textLossWarning?.let { warning ->
-                writeWarningParagraph(xwpfDocument, warning)
-            }
             if (page.paragraphs.isEmpty()) {
-                val emptyParagraph = createRtlParagraph(xwpfDocument)
+                val emptyParagraph = createRtlParagraph(xwpfDocument, ParagraphAlignment.RIGHT)
                 createStyledRun(
                     paragraph = emptyParagraph,
                     text = "",
-                    fontSize = 12,
+                    fontFamily = font,
+                    fontSize = ACADEMIC_BODY_FONT_SIZE_PT,
                     isBold = false,
                     isUnresolvedHighlight = false,
                 )
             } else {
                 page.paragraphs.forEach { runs ->
-                    val paragraph = createRtlParagraph(xwpfDocument)
-                    paragraph.spacingAfter = 80
+                    val paragraph = createRtlParagraph(xwpfDocument, ParagraphAlignment.RIGHT)
+                    paragraph.spacingAfter = 100
                     runs.forEach { segment ->
                         createStyledRun(
                             paragraph = paragraph,
                             text = segment.text,
-                            fontSize = 12,
+                            fontFamily = font,
+                            fontSize = ACADEMIC_BODY_FONT_SIZE_PT,
                             isBold = false,
                             isUnresolvedHighlight = segment.isUnresolvedHighlight,
                         )
@@ -118,150 +190,289 @@ class WordGenerator(
                 }
             }
 
+            if (includeWarnings && (page.pageNumber in warningPageNumbers || page.hasCriticalWarning)) {
+                writePageWarningFootnote(xwpfDocument)
+            }
+
             if (pageIdx < plan.pages.lastIndex) {
-                val spacer = createRtlParagraph(xwpfDocument)
-                spacer.spacingAfter = 160
+                writePageBreak(xwpfDocument)
             }
         }
     }
 
-    private fun writeAcademicMode(xwpfDocument: XWPFDocument, plan: WordDocumentPlan) {
-        val titleParagraph = createRtlParagraph(xwpfDocument).apply {
-            spacingBefore = 120
-            spacingAfter = 240
-        }
-        createStyledRun(
-            paragraph = titleParagraph,
-            text = plan.documentTitle.removeSuffix(".pdf").removeSuffix(".PDF"),
-            fontSize = 20,
-            isBold = true,
-            isUnresolvedHighlight = false,
-        )
-
-        val incompletePageNumbers = findIncompletePages(plan.pages)
-        plan.pages.forEach { page ->
-            val headingParagraph = createRtlParagraph(xwpfDocument).apply {
-                spacingBefore = 200
-                spacingAfter = 120
-            }
-            createStyledRun(
-                paragraph = headingParagraph,
-                text = "الصفحة ${page.pageNumber}",
-                fontSize = 15,
-                isBold = true,
-                isUnresolvedHighlight = false,
-            )
-
-            if (page.pageNumber in incompletePageNumbers) {
-                writeWarningParagraph(xwpfDocument, INCOMPLETE_PAGE_WARNING_MESSAGE)
-            }
-
-            page.textLossWarning?.let { warning ->
-                writeWarningParagraph(xwpfDocument, warning)
-            }
-
-            page.paragraphs.forEach { runs ->
-                writeAcademicSegmentParagraph(xwpfDocument, runs)
-            }
-        }
-    }
-
-    internal fun findIncompletePages(pages: List<com.example.export.model.WordPageSection>): Set<Int> {
-        if (pages.size <= 1) return emptySet()
-        val charCounts = pages.map { page ->
-            page.paragraphs.sumOf { runs -> runs.sumOf { it.text.length } }
-        }
-        return pages.indices.mapNotNull { idx ->
-            val otherSum = charCounts.sum() - charCounts[idx]
-            val otherAvg = otherSum.toDouble() / (pages.size - 1)
-            if (otherAvg > 0.0 && charCounts[idx] < (otherAvg * COMPLETENESS_THRESHOLD_RATIO)) {
-                pages[idx].pageNumber
-            } else {
-                null
-            }
-        }.toSet()
-    }
-
-    private fun writeWarningParagraph(
+    private fun writeAcademicBlocks(
         xwpfDocument: XWPFDocument,
-        warningText: String,
+        blocks: List<StructuredBlock>,
+        includeWarnings: Boolean,
+        warningPageNumbers: Set<Int>,
     ) {
-        val warningParagraph = createRtlParagraph(xwpfDocument).apply {
-            spacingBefore = 60
+        if (blocks.isEmpty()) return
+
+        var currentPageNumber = blocks.firstOrNull { it.type != BlockType.PAGE_BREAK }?.pageNumber ?: 1
+        var pageHasWarningWritten = false
+
+        fun flushPageWarningIfNeeded(pageNum: Int) {
+            if (includeWarnings && !pageHasWarningWritten && pageNum in warningPageNumbers) {
+                writePageWarningFootnote(xwpfDocument)
+                pageHasWarningWritten = true
+            }
+        }
+
+        for (block in blocks) {
+            if (block.type == BlockType.PAGE_BREAK) {
+                flushPageWarningIfNeeded(currentPageNumber)
+                writePageBreak(xwpfDocument)
+                currentPageNumber = block.pageNumber
+                pageHasWarningWritten = false
+                continue
+            }
+
+            if (block.pageNumber != currentPageNumber) {
+                flushPageWarningIfNeeded(currentPageNumber)
+                currentPageNumber = block.pageNumber
+                pageHasWarningWritten = false
+            }
+
+            writeStructuredBlock(xwpfDocument, block)
+        }
+
+        flushPageWarningIfNeeded(currentPageNumber)
+    }
+
+    private fun writeStructuredBlock(
+        xwpfDocument: XWPFDocument,
+        block: StructuredBlock,
+    ) {
+        val runs = block.segments.ifEmpty {
+            listOf(WordTextSegment(text = block.text, isUnresolvedHighlight = false))
+        }
+        val bodyFont = resolveBodyFont()
+        val headingFont = resolveHeadingFont()
+
+        when (block.type) {
+            BlockType.HEADING_1 -> {
+                val p = createRtlParagraph(xwpfDocument, ParagraphAlignment.CENTER, styleId = "Heading1").apply {
+                    spacingBefore = 240
+                    spacingAfter = 140
+                }
+                runs.forEach { seg ->
+                    createStyledRun(
+                        paragraph = p,
+                        text = seg.text,
+                        fontFamily = headingFont,
+                        fontSize = ACADEMIC_H1_FONT_SIZE_PT,
+                        isBold = true,
+                        isUnresolvedHighlight = seg.isUnresolvedHighlight,
+                    )
+                }
+            }
+
+            BlockType.HEADING_2 -> {
+                val p = createRtlParagraph(xwpfDocument, ParagraphAlignment.RIGHT, styleId = "Heading2").apply {
+                    spacingBefore = 200
+                    spacingAfter = 100
+                }
+                runs.forEach { seg ->
+                    createStyledRun(
+                        paragraph = p,
+                        text = seg.text,
+                        fontFamily = headingFont,
+                        fontSize = ACADEMIC_H2_FONT_SIZE_PT,
+                        isBold = true,
+                        isUnresolvedHighlight = seg.isUnresolvedHighlight,
+                    )
+                }
+            }
+
+            BlockType.HEADING_3 -> {
+                val p = createRtlParagraph(xwpfDocument, ParagraphAlignment.RIGHT, styleId = "Heading3").apply {
+                    spacingBefore = 160
+                    spacingAfter = 80
+                }
+                runs.forEach { seg ->
+                    createStyledRun(
+                        paragraph = p,
+                        text = seg.text,
+                        fontFamily = headingFont,
+                        fontSize = ACADEMIC_H3_FONT_SIZE_PT,
+                        isBold = true,
+                        isUnresolvedHighlight = seg.isUnresolvedHighlight,
+                    )
+                }
+            }
+
+            BlockType.BODY -> {
+                val p = createRtlParagraph(xwpfDocument, ParagraphAlignment.BOTH).apply {
+                    spacingBefore = 40
+                    spacingAfter = 120
+                    setSpacingBetween(BODY_LINE_SPACING)
+                    indentationFirstLine = FIRST_LINE_INDENT_TWIPS
+                }
+                runs.forEach { seg ->
+                    createStyledRun(
+                        paragraph = p,
+                        text = seg.text,
+                        fontFamily = bodyFont,
+                        fontSize = ACADEMIC_BODY_FONT_SIZE_PT,
+                        isBold = false,
+                        isUnresolvedHighlight = seg.isUnresolvedHighlight,
+                    )
+                }
+            }
+
+            BlockType.QUOTE -> {
+                val p = createRtlParagraph(xwpfDocument, ParagraphAlignment.BOTH).apply {
+                    spacingBefore = 100
+                    spacingAfter = 120
+                    indentationLeft = QUOTE_SIDE_INDENT_TWIPS
+                    indentationRight = QUOTE_SIDE_INDENT_TWIPS
+                }
+                runs.forEach { seg ->
+                    createStyledRun(
+                        paragraph = p,
+                        text = seg.text,
+                        fontFamily = bodyFont,
+                        fontSize = ACADEMIC_QUOTE_FONT_SIZE_PT,
+                        isBold = false,
+                        isItalic = true,
+                        isUnresolvedHighlight = seg.isUnresolvedHighlight,
+                    )
+                }
+            }
+
+            BlockType.PAGE_BREAK -> {
+                writePageBreak(xwpfDocument)
+            }
+        }
+    }
+
+    private fun fallbackBlocksFromPlan(plan: WordDocumentPlan): List<StructuredBlock> {
+        val result = mutableListOf<StructuredBlock>()
+        plan.pages.forEachIndexed { idx, page ->
+            page.paragraphs.forEach { segs ->
+                val text = segs.joinToString("") { it.text }.trim()
+                if (text.isNotEmpty()) {
+                    val parsed = TextStructureParser.parseSegmentedLines(
+                        listOf(
+                            com.example.export.domain.OcrLine(
+                                text = text,
+                                pageNumber = page.pageNumber,
+                            ) to segs,
+                        ),
+                    )
+                    result.addAll(parsed)
+                }
+            }
+            if (idx < plan.pages.lastIndex) {
+                result.add(
+                    StructuredBlock(
+                        type = BlockType.PAGE_BREAK,
+                        text = "",
+                        pageNumber = plan.pages[idx + 1].pageNumber,
+                    ),
+                )
+            }
+        }
+        return result
+    }
+
+    private fun writePageBreak(xwpfDocument: XWPFDocument) {
+        val p = createRtlParagraph(xwpfDocument, ParagraphAlignment.RIGHT)
+        p.createRun().addBreak(BreakType.PAGE)
+    }
+
+    private fun writePageWarningFootnote(xwpfDocument: XWPFDocument) {
+        val warningParagraph = createRtlParagraph(xwpfDocument, ParagraphAlignment.RIGHT).apply {
+            spacingBefore = 80
             spacingAfter = 100
         }
         createStyledRun(
             paragraph = warningParagraph,
-            text = warningText,
-            fontSize = 12,
+            text = EXPORT_PAGE_WARNING_FOOTNOTE,
+            fontFamily = resolveBodyFont(),
+            fontSize = 10,
             isBold = true,
+            isItalic = false,
             isUnresolvedHighlight = false,
             textColorHex = UNRESOLVED_TEXT_RED_HEX,
         )
     }
 
-    private fun writeAcademicSegmentParagraph(
-        xwpfDocument: XWPFDocument,
-        segments: List<WordTextSegment>,
+    internal fun findIncompletePages(pages: List<com.example.export.model.WordPageSection>): Set<Int> {
+        return WordTextAssembler.findShortPages(pages)
+    }
+
+    private fun registerAcademicStyles(xwpfDocument: XWPFDocument) {
+        val styles = xwpfDocument.createStyles()
+        addHeadingStyle(styles, "Heading1", "Heading 1", ACADEMIC_H1_FONT_SIZE_PT)
+        addHeadingStyle(styles, "Heading2", "Heading 2", ACADEMIC_H2_FONT_SIZE_PT)
+        addHeadingStyle(styles, "Heading3", "Heading 3", ACADEMIC_H3_FONT_SIZE_PT)
+    }
+
+    private fun addHeadingStyle(
+        styles: org.apache.poi.xwpf.usermodel.XWPFStyles,
+        styleId: String,
+        styleName: String,
+        fontSizePt: Int,
     ) {
-        val isHeading = isAcademicHeadingParagraph(segments)
-        val paragraph = createRtlParagraph(xwpfDocument).apply {
-            if (isHeading) {
-                spacingBefore = 180
-                spacingAfter = 100
-            } else {
-                spacingBefore = 60
-                spacingAfter = 160
-                setSpacingBetween(1.5)
-            }
+        if (styles.styleExist(styleId)) return
+        val ctStyle = CTStyle.Factory.newInstance().apply {
+            this.styleId = styleId
+            type = STStyleType.PARAGRAPH
+            addNewName().setVal(styleName)
+            val pPr = addNewPPr()
+            appendWmlElementWithAttr(pPr, "bidi", "val", "1")
+            val rPr = addNewRPr()
+            rPr.addNewB()
+            rPr.addNewBCs()
+            val halfPoints = BigInteger.valueOf((fontSizePt * 2).toLong())
+            rPr.addNewSz().setVal(halfPoints)
+            rPr.addNewSzCs().setVal(halfPoints)
+            val fonts = rPr.addNewRFonts()
+            fonts.ascii = DEFAULT_HEADING_FONT
+            fonts.hAnsi = DEFAULT_HEADING_FONT
+            fonts.cs = DEFAULT_HEADING_FONT
         }
-        val fontSize = if (isHeading) ACADEMIC_HEADING_FONT_SIZE_PT else ACADEMIC_BODY_FONT_SIZE_PT
-        segments.forEach { segment ->
-            createStyledRun(
-                paragraph = paragraph,
-                text = segment.text,
-                fontSize = fontSize,
-                isBold = isHeading,
-                isUnresolvedHighlight = segment.isUnresolvedHighlight,
-            )
-        }
+        styles.addStyle(XWPFStyle(ctStyle))
     }
 
-    internal fun isAcademicHeadingParagraph(segments: List<WordTextSegment>): Boolean {
-        if (segments.any { it.isUnresolvedHighlight }) return false
-        val fullText = segments.joinToString("") { it.text }.trim()
-        if (fullText.isEmpty()) return false
-        if (fullText.first() in BULLET_PREFIXES) return false
-        if (fullText.length > HEADING_MAX_LENGTH) return false
-        val wordCount = fullText.split(WHITESPACE_REGEX).count { it.isNotEmpty() }
-        if (wordCount > HEADING_MAX_WORDS) return false
-        return fullText.last() !in HEADING_EXCLUDED_END_PUNCTUATION
-    }
-
-    private fun createRtlParagraph(xwpfDocument: XWPFDocument): XWPFParagraph {
+    private fun createRtlParagraph(
+        xwpfDocument: XWPFDocument,
+        alignment: ParagraphAlignment,
+        styleId: String? = null,
+    ): XWPFParagraph {
         val paragraph = xwpfDocument.createParagraph()
-        paragraph.alignment = ParagraphAlignment.RIGHT
+        paragraph.alignment = alignment
+        if (!styleId.isNullOrBlank()) {
+            paragraph.style = styleId
+        }
         val pPr = paragraph.ctp.pPr ?: paragraph.ctp.addNewPPr()
-        appendWmlElement(pPr, "bidi")
+        appendWmlElementWithAttr(pPr, "bidi", "val", "1")
         return paragraph
     }
 
     private fun createStyledRun(
         paragraph: XWPFParagraph,
         text: String,
+        fontFamily: String,
         fontSize: Int,
         isBold: Boolean,
+        isItalic: Boolean = false,
         isUnresolvedHighlight: Boolean,
         textColorHex: String? = null,
     ): XWPFRun {
         val run = paragraph.createRun()
         run.fontSize = fontSize
         run.isBold = isBold
-        run.setFontFamily(arabicFontName, XWPFRun.FontCharRange.ascii)
-        run.setFontFamily(arabicFontName, XWPFRun.FontCharRange.hAnsi)
-        run.setFontFamily(arabicFontName, XWPFRun.FontCharRange.cs)
+        run.isItalic = isItalic
+        run.setFontFamily(fontFamily, XWPFRun.FontCharRange.ascii)
+        run.setFontFamily(fontFamily, XWPFRun.FontCharRange.hAnsi)
+        run.setFontFamily(fontFamily, XWPFRun.FontCharRange.cs)
 
         val rPr = run.ctr.rPr ?: run.ctr.addNewRPr()
+        if (!rPr.xmlText().contains("szCs")) {
+            appendWmlElementWithAttr(rPr, "szCs", "val", (fontSize * 2).toString())
+        }
         if (isUnresolvedHighlight) {
             run.color = UNRESOLVED_TEXT_RED_HEX
             appendWmlElementWithAttr(
@@ -273,9 +484,27 @@ class WordGenerator(
         } else if (textColorHex != null) {
             run.color = textColorHex
         }
-        appendWmlElement(rPr, "rtl")
+        appendWmlElementWithAttr(rPr, "rtl", "val", "1")
+        appendArabicLanguageElement(rPr, DEFAULT_DOCUMENT_LANG)
         appendRunTextElement(run, text)
         return run
+    }
+
+    private fun resolveHeadingFont(): String =
+        if (arabicFontName != DEFAULT_BODY_FONT) arabicFontName else DEFAULT_HEADING_FONT
+
+    private fun resolveBodyFont(): String = arabicFontName
+
+    private fun appendArabicLanguageElement(parent: XmlObject, langTag: String) {
+        val cursor = parent.newCursor()
+        try {
+            cursor.toEndToken()
+            cursor.beginElement("lang", WML_NAMESPACE)
+            cursor.insertAttributeWithValue("val", WML_NAMESPACE, langTag)
+            cursor.insertAttributeWithValue("bidi", WML_NAMESPACE, langTag)
+        } finally {
+            cursor.dispose()
+        }
     }
 
     private fun appendRunTextElement(run: XWPFRun, text: String) {
@@ -297,17 +526,7 @@ class WordGenerator(
     private fun enforceDocumentRtlSection(xwpfDocument: XWPFDocument) {
         val body = xwpfDocument.document.body
         val sectPr = body.sectPr ?: body.addNewSectPr()
-        appendWmlElement(sectPr, "bidi")
-    }
-
-    private fun appendWmlElement(parent: XmlObject, localName: String) {
-        val cursor = parent.newCursor()
-        try {
-            cursor.toEndToken()
-            cursor.beginElement(localName, WML_NAMESPACE)
-        } finally {
-            cursor.dispose()
-        }
+        appendWmlElementWithAttr(sectPr, "bidi", "val", "1")
     }
 
     private fun appendWmlElementWithAttr(
@@ -337,18 +556,27 @@ class WordGenerator(
     }
 
     companion object {
-        const val DEFAULT_ARABIC_FONT = "Traditional Arabic"
+        const val DEFAULT_HEADING_FONT = "Traditional Arabic"
+        const val DEFAULT_BODY_FONT = "Simplified Arabic"
+        const val DEFAULT_ARABIC_FONT = DEFAULT_BODY_FONT
+        const val DEFAULT_DOCUMENT_LANG = "ar-TN"
         const val UNRESOLVED_TEXT_RED_HEX = "B71C1C"
-        const val ACADEMIC_BODY_FONT_SIZE_PT = 14
-        const val ACADEMIC_HEADING_FONT_SIZE_PT = 16
-        private const val COMPLETENESS_THRESHOLD_RATIO = 0.20
-        const val INCOMPLETE_PAGE_WARNING_MESSAGE =
-            "تحذير: يبدو أن هذه الصفحة لم يتم استخراج نصها بالكامل. يرجى مراجعة الصورة الأصلية."
-        private const val HEADING_MAX_LENGTH = 65
-        private const val HEADING_MAX_WORDS = 9
-        private val WHITESPACE_REGEX = Regex("\\s+")
-        private val BULLET_PREFIXES = setOf('-', '•', '✓', '❖')
-        private val HEADING_EXCLUDED_END_PUNCTUATION = setOf('.', '؟', '!', ':', '؛', '،', ',', '"', '»', ')')
+
+        const val ACADEMIC_H1_FONT_SIZE_PT = 18
+        const val ACADEMIC_H2_FONT_SIZE_PT = 16
+        const val ACADEMIC_H3_FONT_SIZE_PT = 14
+        const val ACADEMIC_BODY_FONT_SIZE_PT = 12
+        const val ACADEMIC_QUOTE_FONT_SIZE_PT = 10
+        const val ACADEMIC_HEADING_FONT_SIZE_PT = ACADEMIC_H2_FONT_SIZE_PT
+
+        const val BODY_LINE_SPACING = 1.5
+        const val FIRST_LINE_INDENT_TWIPS = 709 // ~1.25 cm
+        const val QUOTE_SIDE_INDENT_TWIPS = 567 // ~1.00 cm
+
+        const val EXPORT_PAGE_WARNING_FOOTNOTE =
+            "[تحذير: قد يكون نص هذه الصفحة ناقصاً - راجع الصورة الأصلية]"
+        const val INCOMPLETE_PAGE_WARNING_MESSAGE = EXPORT_PAGE_WARNING_FOOTNOTE
+
         private const val WML_NAMESPACE = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
         private const val XML_NAMESPACE = "http://www.w3.org/XML/1998/namespace"
 
@@ -374,3 +602,4 @@ class WordGenerator(
         }
     }
 }
+

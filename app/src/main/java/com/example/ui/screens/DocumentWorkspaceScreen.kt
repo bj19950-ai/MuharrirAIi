@@ -94,6 +94,7 @@ import com.example.domain.model.GeminiUsageStats
 import com.example.domain.model.ImportStatus
 import com.example.domain.model.OcrEngineType
 import com.example.domain.model.OcrPageStatus
+import com.example.domain.model.PageFailureReasons
 import com.example.domain.model.PageRecord
 import com.example.domain.model.PipelineStageInfo
 import com.example.domain.ocr.OcrAvailabilityResult
@@ -126,6 +127,8 @@ fun DocumentWorkspaceScreen(
     suspiciousFixState: SuspiciousFixUiState = SuspiciousFixUiState(),
     pagesWithMissingContent: List<PageRecord> = emptyList(),
     reprocessingMissingPageIds: Set<String> = emptySet(),
+    pagesWithFailedAnalysis: List<PageRecord> = emptyList(),
+    retryingPageIds: Set<Int> = emptySet(),
     geminiState: GeminiExecutionUiState,
     geminiKeys: List<GeminiKeyRecord>,
     geminiUsageStats: GeminiUsageStats,
@@ -145,6 +148,9 @@ fun DocumentWorkspaceScreen(
     onStartGeminiAnalysis: (String, String?, Int?, Int?) -> Unit,
     onFixSuspiciousPagesWithGemini: (String) -> Unit = {},
     onForceGeminiExtractionForPage: (String, Int) -> Unit = { _, _ -> },
+    onRetryFailedPage: (String, Int) -> Unit = { _, _ -> },
+    onSkipFailedPage: (String, Int) -> Unit = { _, _ -> },
+    onRetryAllFailedPages: (String) -> Unit = {},
     onPauseGeminiAnalysis: () -> Unit,
     wordExportViewModel: WordExportViewModel,
     onOpenSettings: () -> Unit,
@@ -380,6 +386,25 @@ fun DocumentWorkspaceScreen(
                         onPause = onPauseOcr,
                         onReprocessFailedPages = { onReprocessFailedPages(context, document.id) },
                     )
+                }
+
+                if (pagesWithFailedAnalysis.isNotEmpty()) {
+                    item {
+                        FailedAnalysisCard(
+                            pagesWithFailedAnalysis = pagesWithFailedAnalysis,
+                            retryingPageIds = retryingPageIds,
+                            isAnyGlobalBatchRunning = ocrState.isRunning || geminiState.isRunning || suspiciousFixState.isRunning,
+                            onRetryPage = { pageNumber ->
+                                onRetryFailedPage(document.id, pageNumber)
+                            },
+                            onSkipPage = { pageNumber ->
+                                onSkipFailedPage(document.id, pageNumber)
+                            },
+                            onRetryAll = {
+                                onRetryAllFailedPages(document.id)
+                            },
+                        )
+                    }
                 }
 
                 if (pagesWithMissingContent.isNotEmpty()) {
@@ -2136,6 +2161,178 @@ private fun MissingContentAuditCard(
         }
     }
 }
+
+@Composable
+private fun FailedAnalysisCard(
+    pagesWithFailedAnalysis: List<PageRecord>,
+    retryingPageIds: Set<Int>,
+    isAnyGlobalBatchRunning: Boolean,
+    onRetryPage: (Int) -> Unit,
+    onSkipPage: (Int) -> Unit,
+    onRetryAll: () -> Unit,
+) {
+    val pageNumbersText = remember(pagesWithFailedAnalysis) {
+        pagesWithFailedAnalysis.joinToString("، ") { it.originalPageNumber.toString() }
+    }
+    val isAnyRetrying = retryingPageIds.isNotEmpty()
+
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("failed_analysis_card"),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer),
+        border = BorderStroke(1.5.dp, MaterialTheme.colorScheme.error),
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.Top,
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.ErrorOutline,
+                    contentDescription = "تحذير تعذر تحليل صفحات",
+                    tint = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.padding(top = 2.dp),
+                )
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    Text(
+                        text = "تعذر تحليل الصفحات التالية: [$pageNumbersText]",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onErrorContainer,
+                        modifier = Modifier.testTag("failed_analysis_text"),
+                    )
+                    Text(
+                        text = "يمكنك إعادة محاولة التحليل لكل صفحة على حدة أو للكل دفعة واحدة، أو تخطي الصفحة مع الاحتفاظ بنص OCR وعناصر المراجعة الحالية.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onErrorContainer.copy(alpha = 0.85f),
+                    )
+                }
+            }
+
+            Button(
+                onClick = onRetryAll,
+                enabled = !isAnyGlobalBatchRunning && !isAnyRetrying,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.error,
+                    contentColor = MaterialTheme.colorScheme.onError,
+                ),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 48.dp)
+                    .testTag("retry_all_failed_button"),
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.Refresh,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp),
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text("إعادة محاولة الكل")
+            }
+
+            HorizontalDivider(color = MaterialTheme.colorScheme.error.copy(alpha = 0.35f))
+
+            pagesWithFailedAnalysis.forEach { page ->
+                val pageNumber = page.originalPageNumber
+                val isRetrying = retryingPageIds.contains(pageNumber)
+                val reasonHintAr = failedReasonLabelAr(page.failureReason)
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("failed_analysis_page_row_$pageNumber"),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(
+                        modifier = Modifier.weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(2.dp),
+                    ) {
+                        Text(
+                            text = "صفحة $pageNumber",
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onErrorContainer,
+                        )
+                        if (reasonHintAr != null) {
+                            Text(
+                                text = reasonHintAr,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onErrorContainer.copy(alpha = 0.8f),
+                            )
+                        }
+                    }
+
+                    if (isRetrying) {
+                        CircularProgressIndicator(
+                            modifier = Modifier
+                                .size(28.dp)
+                                .testTag("failed_page_spinner_$pageNumber"),
+                            strokeWidth = 2.5.dp,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                    } else {
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Button(
+                                onClick = { onRetryPage(pageNumber) },
+                                enabled = !isAnyGlobalBatchRunning && !isAnyRetrying,
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = MaterialTheme.colorScheme.error,
+                                    contentColor = MaterialTheme.colorScheme.onError,
+                                ),
+                                modifier = Modifier
+                                    .heightIn(min = 48.dp)
+                                    .testTag("failed_page_retry_button_$pageNumber"),
+                            ) {
+                                Text("إعادة المحاولة")
+                            }
+                            OutlinedButton(
+                                onClick = { onSkipPage(pageNumber) },
+                                enabled = !isAnyGlobalBatchRunning && !isAnyRetrying,
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.error),
+                                modifier = Modifier
+                                    .heightIn(min = 48.dp)
+                                    .testTag("failed_page_skip_button_$pageNumber"),
+                            ) {
+                                Text(
+                                    text = "تخطي",
+                                    color = MaterialTheme.colorScheme.onErrorContainer,
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+private fun failedReasonLabelAr(reason: String?): String? = when (reason) {
+    PageFailureReasons.TIMEOUT -> "السبب: انتهت مهلة الاستجابة"
+    PageFailureReasons.QUOTA -> "السبب: نفدت الحصة"
+    PageFailureReasons.RATE_LIMITED -> "السبب: تجاوز معدل الطلبات"
+    PageFailureReasons.PARSE_ERROR -> "السبب: صيغة استجابة غير صالحة"
+    PageFailureReasons.NETWORK_ERROR -> "السبب: خطأ في الشبكة"
+    PageFailureReasons.INVALID_KEY -> "السبب: مفتاح API غير صالح"
+    PageFailureReasons.PERMISSION_DENIED -> "السبب: رفض الصلاحية"
+    PageFailureReasons.SERVER_ERROR -> "السبب: خطأ مؤقت من الخادم"
+    PageFailureReasons.RENDER_ERROR -> "السبب: تعذر تصيير الصفحة"
+    PageFailureReasons.UNKNOWN_ERROR -> "السبب: خطأ غير متوقع"
+    else -> null
+}
+
 
 
 

@@ -79,6 +79,7 @@ data class PageEntity(
     val ocrErrorMessageAr: String? = null,
     val ocrUpdatedAtMillis: Long? = null,
     val hasMissingContent: Boolean = false,
+    val failureReason: String? = null,
 )
 
 @Entity(
@@ -325,6 +326,7 @@ fun PageEntity.toDomain(
         ocrResult = ocrResultEntity?.toDomain(),
         geminiAnalysis = geminiAnalysisEntity?.toDomain(),
         hasMissingContent = hasMissingContent,
+        failureReason = failureReason,
     )
 }
 

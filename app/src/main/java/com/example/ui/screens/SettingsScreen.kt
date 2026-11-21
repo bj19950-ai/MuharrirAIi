@@ -106,6 +106,8 @@ fun SettingsScreen(
     onToggleResumeAfterInterruption: (Boolean) -> Unit,
     autoAcceptHighConfidenceGemini: Boolean = false,
     onToggleAutoAcceptHighConfidenceGemini: (Boolean) -> Unit = {},
+    showExportWarnings: Boolean = true,
+    onToggleShowExportWarnings: (Boolean) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     var showAddKeyDialog by remember { mutableStateOf(false) }
@@ -129,7 +131,8 @@ fun SettingsScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .widthIn(max = 920.dp)
-                .align(Alignment.TopCenter),
+                .align(Alignment.TopCenter)
+                .testTag("settings_list"),
             contentPadding = PaddingValues(16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
@@ -241,8 +244,10 @@ fun SettingsScreen(
                 WordFormattingCard(
                     selectedMode = preferences.preferredExportMode,
                     highlightUnresolved = preferences.highlightUnresolvedInDocx,
+                    showExportWarnings = showExportWarnings,
                     onSelectMode = onSelectExportMode,
                     onToggleHighlight = onToggleHighlightUnresolved,
+                    onToggleShowExportWarnings = onToggleShowExportWarnings,
                 )
             }
 
@@ -645,8 +650,10 @@ private fun OcrConfigurationCard(
 private fun WordFormattingCard(
     selectedMode: ExportMode,
     highlightUnresolved: Boolean,
+    showExportWarnings: Boolean,
     onSelectMode: (ExportMode) -> Unit,
     onToggleHighlight: (Boolean) -> Unit,
+    onToggleShowExportWarnings: (Boolean) -> Unit,
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -705,6 +712,32 @@ private fun WordFormattingCard(
                 Switch(
                     checked = highlightUnresolved,
                     onCheckedChange = onToggleHighlight,
+                )
+            }
+
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "إظهار تحذيرات التصدير",
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Medium,
+                    )
+                    Text(
+                        text = "تنبيهك قبل التصدير أو المشاركة إذا كانت هناك صفحات غير مكتملة أو تحتاج مراجعة.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Switch(
+                    checked = showExportWarnings,
+                    onCheckedChange = onToggleShowExportWarnings,
+                    modifier = Modifier.testTag("settings_show_export_warnings_switch"),
                 )
             }
         }

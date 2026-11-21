@@ -528,6 +528,7 @@ class Module04GeminiTest {
                 MuharrirDatabase.MIGRATION_3_4,
                 MuharrirDatabase.MIGRATION_4_5,
                 MuharrirDatabase.MIGRATION_5_6,
+                MuharrirDatabase.MIGRATION_6_7,
             )
             .allowMainThreadQueries()
             .build()

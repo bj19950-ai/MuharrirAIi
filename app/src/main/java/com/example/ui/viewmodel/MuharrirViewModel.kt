@@ -22,7 +22,9 @@ import com.example.domain.model.GeminiKeyRecord
 import com.example.domain.model.GeminiUsageStats
 import com.example.domain.model.ImportStatus
 import com.example.domain.model.OcrEngineType
+import com.example.domain.model.PageFailureReasons
 import com.example.domain.model.PageRecord
+import com.example.domain.model.PageStatus
 import com.example.domain.model.PipelineStageInfo
 import com.example.domain.model.ProcessingPreferences
 import com.example.domain.ocr.OcrAvailabilityResult
@@ -151,6 +153,7 @@ class MuharrirViewModel(
 
     private val smartReviewStore = SmartReviewPreferencesStore.getInstance(application)
     val autoAcceptHighConfidenceGemini: StateFlow<Boolean> = smartReviewStore.autoAcceptHighConfidence
+    val showExportWarnings: StateFlow<Boolean> = smartReviewStore.showExportWarnings
 
     private val _selectedFilter = MutableStateFlow(DashboardFilter.ALL)
     private val _selectedDocumentId = MutableStateFlow<String?>(null)
@@ -188,6 +191,9 @@ class MuharrirViewModel(
 
     private val _reprocessingMissingPageIds = MutableStateFlow<Set<String>>(emptySet())
     val reprocessingMissingPageIds: StateFlow<Set<String>> = _reprocessingMissingPageIds.asStateFlow()
+
+    private val _retryingPageIds = MutableStateFlow<Set<Int>>(emptySet())
+    val retryingPageIds: StateFlow<Set<Int>> = _retryingPageIds.asStateFlow()
 
     private val suspiciousRefreshTrigger = MutableStateFlow(0)
 
@@ -337,6 +343,22 @@ class MuharrirViewModel(
         .map { doc ->
             doc?.pages
                 ?.filter { it.hasMissingContent }
+                ?.sortedBy { it.originalPageNumber }
+                .orEmpty()
+        }
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(5_000),
+            initialValue = emptyList(),
+        )
+
+    val pagesWithFailedAnalysis: StateFlow<List<PageRecord>> = activeDocument
+        .map { doc ->
+            doc?.pages
+                ?.filter {
+                    it.status == PageStatus.FAILED &&
+                        it.failureReason != PageFailureReasons.USER_SKIPPED
+                }
                 ?.sortedBy { it.originalPageNumber }
                 .orEmpty()
         }
@@ -825,6 +847,10 @@ class MuharrirViewModel(
         smartReviewStore.setAutoAcceptHighConfidenceEnabled(enabled)
     }
 
+    fun setShowExportWarnings(enabled: Boolean) {
+        smartReviewStore.setShowExportWarningsEnabled(enabled)
+    }
+
     fun addGeminiApiKey(label: String, rawApiKey: String) {
         viewModelScope.launch {
             val result = repository.addGeminiKey(label, rawApiKey)
@@ -985,6 +1011,79 @@ class MuharrirViewModel(
             } finally {
                 _reprocessingMissingPageIds.update { it - pageId }
                 suspiciousRefreshTrigger.update { it + 1 }
+            }
+        }
+    }
+
+    fun skipPageAnalysis(documentId: String, pageNumber: Int) {
+        viewModelScope.launch {
+            val result = repository.skipPageAnalysis(documentId, pageNumber)
+            result.fold(
+                onSuccess = {
+                    _workspaceNoticeAr.value =
+                        "تم تخطي تحليل صفحة $pageNumber عبر Gemini مع الإبقاء على نص OCR وعناصر المراجعة الحالية."
+                },
+                onFailure = { err ->
+                    _workspaceNoticeAr.value =
+                        err.message ?: "تعذر تخطي صفحة $pageNumber."
+                },
+            )
+        }
+    }
+
+    fun retryPageAnalysis(documentId: String, pageNumber: Int) {
+        if (_retryingPageIds.value.contains(pageNumber)) return
+        viewModelScope.launch {
+            _retryingPageIds.update { it + pageNumber }
+            try {
+                val result = repository.retryPageAnalysis(documentId, pageNumber)
+                result.fold(
+                    onSuccess = {
+                        _workspaceNoticeAr.value =
+                            "تمت إعادة تحليل صفحة $pageNumber عبر Gemini بنجاح."
+                    },
+                    onFailure = { err ->
+                        _workspaceNoticeAr.value =
+                            err.message ?: "تعذرت إعادة تحليل صفحة $pageNumber عبر Gemini."
+                    },
+                )
+            } finally {
+                _retryingPageIds.update { it - pageNumber }
+                suspiciousRefreshTrigger.update { it + 1 }
+            }
+        }
+    }
+
+    fun retryAllFailed(documentId: String) {
+        if (_retryingPageIds.value.isNotEmpty()) return
+        viewModelScope.launch {
+            val failedPages = repository.getPagesWithFailedAnalysis(documentId)
+            if (failedPages.isEmpty()) return@launch
+
+            var succeeded = 0
+            var failed = 0
+            for (page in failedPages) {
+                val pageNumber = page.originalPageNumber
+                _retryingPageIds.update { it + pageNumber }
+                try {
+                    val result = repository.retryPageAnalysis(documentId, pageNumber)
+                    if (result.isSuccess) {
+                        succeeded++
+                    } else {
+                        failed++
+                    }
+                } finally {
+                    _retryingPageIds.update { it - pageNumber }
+                }
+            }
+            suspiciousRefreshTrigger.update { it + 1 }
+            _workspaceNoticeAr.value = when {
+                succeeded > 0 && failed == 0 ->
+                    "تمت إعادة تحليل جميع الصفحات المتعثرة ($succeeded) بنجاح."
+                succeeded > 0 && failed > 0 ->
+                    "تمت إعادة تحليل $succeeded صفحة بنجاح، ولا تزال $failed صفحة متعثرة."
+                else ->
+                    "تعذرت إعادة تحليل الصفحات المتعثرة ($failed صفحة)."
             }
         }
     }
